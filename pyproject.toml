@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "huanzhizhi"
+version = "0.1.0"
+description = "幻之之 Windows 桌宠任务助手"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = ["windows-capture>=2,<3", "numpy>=1.23,<3", "opencv-python>=4.9,<5", "Pillow>=11,<13", "PySide6>=6.8,<7"]
+
+[project.gui-scripts]
+huanzhizhi = "huanzhizhi.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+huanzhizhi = ["assets/*.png", "assets/point/*.png"]
+

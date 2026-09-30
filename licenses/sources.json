@@ -1,0 +1,34 @@
+[
+  {
+    "package": "numpy",
+    "version": "1.23.5"
+  },
+  {
+    "package": "opencv-python",
+    "version": "4.9.0.80"
+  },
+  {
+    "package": "Pillow",
+    "version": "12.3.0"
+  },
+  {
+    "package": "pywin32",
+    "version": "306"
+  },
+  {
+    "package": "PyInstaller",
+    "version": "6.20.0"
+  },
+  {
+    "file": "Qt/LGPL-3.0.txt",
+    "source": "https://raw.githubusercontent.com/qt/qtbase/v6.11.2/LICENSES/LGPL-3.0-only.txt"
+  },
+  {
+    "file": "Qt/GPL-3.0.txt",
+    "source": "https://raw.githubusercontent.com/qt/qtbase/v6.11.2/LICENSES/GPL-3.0-only.txt"
+  },
+  {
+    "file": "windows-capture/LICENCE",
+    "source": "https://raw.githubusercontent.com/NiiightmareXD/windows-capture/main/windows-capture-python/LICENCE"
+  }
+]
