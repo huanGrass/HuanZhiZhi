@@ -26,4 +26,6 @@
 - `src/huanzhizhi/assets/themes/ufo/`
 - `src/huanzhizhi/assets/themes/broom/`
 
+README 配图 `docs/images/zhizhi.png` 提取自飞碟主题的静止帧，适用相同授权。
+
 不要求保留图片原样；分发时保留相应许可说明。旧 PNG 的历史许可说明继续保留，第三方图标仍适用其各自许可证。

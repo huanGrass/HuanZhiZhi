@@ -35,6 +35,8 @@ Windows 原生窗口恢复测试需要 `QT_QPA_PLATFORM=windows`，无界面测�
 
 ## 完整包
 
+安装包根目录的 `README.md` 使用 `docs/portable-readme.md`，源码仓库的 README 只说明源码运行方式。
+
 完整包自动编译 `幻之之.exe` 启动器，源码位于 `scripts/launcher.cs`。构建使用 Windows 系统的 `.NET Framework 4.x` C# 编译器（`Framework64/v4.0.30319/csc.exe`），不需要安装 .NET SDK 或 PyInstaller；图标由现有应用 PNG 转换生成。启动器定位自身目录中的 `python/pythonw.exe`，不依赖当前工作目录或系统 Python；单实例仍由宿主负责。
 
 `dist/<版本>/` 只放最终交付的 ZIP、校验值和验证记录。未压缩构建与下载缓存放在 `build/`，验证日志放在 `artifacts/`。构建输出目录必须不存在，重建前先移走旧输出：

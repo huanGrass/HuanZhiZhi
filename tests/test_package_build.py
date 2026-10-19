@@ -65,7 +65,7 @@ class PackageBuildTests(unittest.TestCase):
         self.assertNotEqual(fingerprint_tree(directory), original)
 
     def test_invalid_paths_and_missing_entries(self):
-        for task_id in ("../demo", "", "a/b"):
+        for task_id in ("../demo", "", "a/b", "CON", "技能.", " 技能", "技能:一"):
             with self.assertRaises(ValueError):
                 task_directory(self.root, task_id)
         with self.assertRaises(FileNotFoundError):
@@ -74,9 +74,9 @@ class PackageBuildTests(unittest.TestCase):
             build_package(self.root, self.root / "python/new")
 
     def test_chinese_task_directory(self):
-        directory = self.root / 'tasks/中文技能'
+        directory = self.root / 'tasks/中文 技能（测试）'
         (self.root / 'tasks/demo').rename(directory)
-        self.assertEqual(task_directory(self.root, '中文技能'), directory.resolve())
+        self.assertEqual(task_directory(self.root, '中文 技能（测试）'), directory.resolve())
 
     def test_existing_output_and_unpaired_options_are_rejected(self):
         with self.assertRaises(FileExistsError):
@@ -135,6 +135,7 @@ class PackageBuildTests(unittest.TestCase):
         regression = self.root / "python/Lib/test/certdata"
         regression.mkdir(parents=True)
         (regression / "test-key.pem").write_bytes(b"upstream regression fixture")
+        (self.root / "docs/portable-readme.md").write_text("双击 幻之之.exe", encoding="utf-8")
         output = Path(self.temp.name) / "full-release"
         before = fingerprint_tree(dependencies)
         with patch("scripts.build_package.verify_python"), \
@@ -182,6 +183,7 @@ class PackageBuildTests(unittest.TestCase):
         for name in ("licenses", "docs", "dependencies"):
             (self.root / name).mkdir()
         (self.root / "dependencies/README.md").write_text("fixture", encoding="utf-8")
+        (self.root / "docs/portable-readme.md").write_text("双击 幻之之.exe", encoding="utf-8")
         output = Path(self.temp.name) / "host-only"
         with patch("scripts.build_package.verify_python"), \
                 patch("scripts.build_package.build_launcher",
@@ -189,6 +191,7 @@ class PackageBuildTests(unittest.TestCase):
                 patch("scripts.build_package.environment_info",
                       side_effect=lambda _: {"python": "3.11.9", "architecture": "64bit", "dependencies": {}}):
             build_package(self.root, output)
+        self.assertEqual((output / "README.md").read_text(encoding="utf-8"), "双击 幻之之.exe")
         self.assertEqual(list((output / "tasks").iterdir()), [])
         self.assertEqual(json.loads((output / "build-info.json").read_text())["tasks"], [])
         self.assertTrue((self.root / "tasks/demo/task.py").exists())

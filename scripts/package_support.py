@@ -3,9 +3,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
+
+from huanzhizhi.tasks.storage import validate_skill_name
 
 FORMAT = "portable-python-v1"
 DEFAULT_TASKS = ()
@@ -55,8 +56,7 @@ def runtime_ignore(directory, names):
 
 
 def task_directory(root, task_id):
-    if not re.fullmatch(r"[^\W_][\w-]*", task_id):
-        raise ValueError(f"Invalid task id: {task_id!r}")
+    validate_skill_name(task_id)
     tasks_root = (Path(root) / "tasks").resolve()
     directory = (tasks_root / task_id).resolve()
     if not directory.is_relative_to(tasks_root):

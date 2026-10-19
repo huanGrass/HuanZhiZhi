@@ -217,6 +217,14 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         rows = QtWidgets.QVBoxLayout(card)
         self._ai_switch = ToggleSwitch('启用 AI')
         rows.addLayout(self._row('启用 AI', '关闭后仍可运行已有技能。', self._ai_switch))
+        permissions = QtWidgets.QLabel(
+            'AI 会以你的用户权限执行命令、读写文件，也可能操作鼠标和键盘。'
+            '草稿目录仅通过指令约定，不是强制文件沙箱。'
+            'Codex 使用完整权限且不逐项请求批准；OpenCode 使用自动模式，仍遵守其显式拒绝规则。'
+            '请在了解这些权限后启用 AI。')
+        permissions.setObjectName('desktopPetSettingsRowDetail')
+        permissions.setWordWrap(True)
+        rows.addWidget(permissions)
         rows.addWidget(self._divider())
         self._agent_combo = ComboBox()
         self._agent_combo.setAccessibleName('AI 工具')

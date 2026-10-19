@@ -13,7 +13,7 @@ from huanzhizhi.agents.runtime import AgentTaskError, run_agent
 from huanzhizhi.agents.codex import adapter as ai_codex
 from huanzhizhi.agents.opencode import adapter as ai_opencode
 from huanzhizhi.tasks.catalog import TaskCatalog
-from huanzhizhi.tasks.storage import skill_files as _skill_files, publish_skill, synchronize_skill_names
+from huanzhizhi.tasks.storage import skill_files as _skill_files, publish_skill, synchronize_skill_names, validate_skill_name
 from huanzhizhi.settings.component import (
     DEFAULT_CODEX_OPTIONS, SettingsComponent, SettingsError,
 )
@@ -223,15 +223,15 @@ class CreationWorker(QtCore.QThread):
                 raw_manifest = json.loads(task.script_path.with_name('skill.json').read_text(encoding='utf-8'))
                 # Validate the entry's syntax without executing generated code.
                 compile(task.script_path.read_bytes(), str(task.script_path), 'exec')
+                validate_skill_name(task.name)
                 if baseline:
                     original_manifest = json.loads(self.source_skill.joinpath('skill.json').read_text(encoding='utf-8'))
                     if (task.id != baseline['id'] or raw_manifest['id'] != task.id
                             or raw_manifest.get('name', task.id) not in (task.id, original_manifest.get('name', task.id))):
                         raise ValueError('修改后的技能必须保留原 ID 和名称，原技能未替换。')
                 elif (raw_manifest['id'] != task.id or raw_manifest.get('name', task.id) != task.id
-                        or not re.fullmatch(r'[^\W_][\w-]*', task.name)
                         or not re.search(r'[\u3400-\u9fff]', task.name)):
-                    raise ValueError('技能 id、name 和目录名须使用相同的中文名称（中文、字母、数字、下划线或连字符），草稿已保留。')
+                    raise ValueError('技能 id、name 和目录名须使用相同的中文名称，且不能包含 Windows 文件名禁用字符，草稿已保留。')
                 synchronize_skill_names(tasks, None)
                 source = output / task.id
                 destination = self.source_skill if baseline else self.test_tasks_root / task.id

@@ -243,6 +243,20 @@ class CreationTests(unittest.TestCase):
         worker.thread_id = 'test-thread'
         return 'Local deterministic test; no game tested.'
 
+    def test_publish_name_with_spaces_and_parentheses(self):
+        def develop(worker):
+            result = self.prepare_task(worker)
+            source = worker.directory / 'output' / '确定性测试技能'
+            destination = source.with_name('整理 文件（测试）')
+            source.rename(destination)
+            write_skill_manifest(destination / 'task.py', task_id=destination.name)
+            return result
+        with patch('huanzhizhi.skill_creation.develop', side_effect=develop):
+            self.worker.run()
+        self.assertEqual(self.errors, [])
+        self.assertEqual(len(self.saved), 1)
+        self.assertEqual(Path(self.saved[0]).name, '整理 文件（测试）')
+
     def test_publish_ordinary_task_and_run_through_existing_sdk(self):
         with patch('huanzhizhi.skill_creation.develop', side_effect=self.prepare_task):
             self.worker.run()

@@ -44,10 +44,11 @@ def build_package(root, output, *, tasks=DEFAULT_TASKS, task=None, base_bundle=N
         if not task:
             shutil.copytree(root / "python", stage / "python", ignore=runtime_ignore)
             shutil.copytree(root / "src", stage / "src", ignore=ignore)
-            for name in ("README.md", "CHANGELOG.md", "LICENSE", "requirements.txt", "pyproject.toml"):
+            for name in ("CHANGELOG.md", "LICENSE", "requirements.txt", "pyproject.toml"):
                 shutil.copy2(root / name, stage / name)
             for directory in ("licenses", "docs"):
                 shutil.copytree(root / directory, stage / directory, ignore=ignore)
+            shutil.copy2(root / "docs" / "portable-readme.md", stage / "README.md")
             (stage / "dependencies").mkdir()
             shutil.copy2(root / "dependencies" / "README.md", stage / "dependencies" / "README.md")
             build_launcher(root, stage / "幻之之.exe")
