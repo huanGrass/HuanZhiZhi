@@ -9,10 +9,14 @@ from typing import TYPE_CHECKING
 from PySide6 import QtCore, QtGui, QtWidgets
 from huanzhizhi.widgets import BUTTON_STYLE, ComboBox, ToggleSwitch
 
+from huanzhizhi.tasks.storage import export_skill
 from huanzhizhi.pet import PetComponent
 from huanzhizhi.pet.context_menu import display_scale_label
 from .component import CODEX_REASONING_EFFORTS, DEFAULT_CODEX_OPTIONS, SettingsComponent
 from .environment import EnvironmentPage
+from .cloud import CloudSkillsPage
+from .about import AboutPage
+from .import_skills import ImportSkillsDialog
 from huanzhizhi.agents.codex import adapter as ai_codex
 from huanzhizhi.agents.opencode.guide import OpenCodeGuide
 from huanzhizhi.agents.runtime import SettingsError
@@ -88,6 +92,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._settings = settings
         self._log_path = log_path
         self._closed = False
+        self._skill_import = None
         self._window = _SettingsWindow()
         self._window.setObjectName("desktopPetSettingsWindow")
         self._window.setWindowTitle("幻之之设置")
@@ -98,6 +103,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         if self._tasks is not None:
             self._tasks.tasks_changed.connect(self._sync_tasks)
             self._tasks.process.state_changed.connect(self._sync_input_options)
+        self._pet.window.skill_zips_dropped.connect(self._import_dropped_tasks)
         self._pet.scale_changed.connect(self._sync_scale)
         self._pet.mouse_point_visible_changed.connect(self._sync_mouse_point_visible)
         self._pet.theme_changed.connect(self._sync_input_options)
@@ -118,7 +124,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
                     self._tasks.reload_tasks()
                 self._sync_tasks()
             except Exception as exc:
-                self.error.emit(f"读取任务列表失败：{exc}")
+                self.error.emit(f"读取技能列表失败：{exc}")
         self._load_log()
         self._window.show()
         if self._window.isMinimized():
@@ -127,13 +133,21 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._window.activateWindow()
 
     def show_ai_settings(self) -> None:
-        self._navigation.setCurrentRow(3)
+        self._navigation.setCurrentRow(2)
         self.show()
 
     def close(self) -> None:
         if not self._closed:
+            self._pet.window.skill_zips_dropped.disconnect(self._import_dropped_tasks)
+            if self._skill_import is not None:
+                dialog = self._skill_import
+                self._skill_import = None
+                dialog.stop()
+                dialog.deleteLater()
             self._opencode_guide.stop()
             self._environment_page.stop()
+            self._cloud_page.stop()
+            self._about_page.stop()
             # Child destruction may follow collection of this controller's attributes.
             for watched in self._window.findChildren(QtCore.QObject):
                 watched.removeEventFilter(self)
@@ -157,10 +171,10 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._navigation.setObjectName("desktopPetSettingsNavigation")
         self._navigation.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._navigation.addItem("常规")
-        self._navigation.addItem("运行日志")
-        self._navigation.addItem("任务列表")
+        self._navigation.addItem("技能列表")
         self._navigation.addItem("AI 设置")
         self._navigation.addItem("外部组件")
+        self._navigation.addItem("关于幻之之")
         self._navigation.setCurrentRow(0)
         sidebar_layout.addWidget(brand)
         sidebar_layout.addWidget(section)
@@ -173,12 +187,22 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         content_layout.setContentsMargins(42, 32, 42, 36)
         self._pages = QtWidgets.QStackedWidget()
         self._pages.addWidget(self._build_general_page())
-        self._pages.addWidget(self._build_log_page())
         self._pages.addWidget(self._build_tasks_page())
         self._pages.addWidget(self._build_ai_page())
         self._environment_page = EnvironmentPage()
         self._pages.addWidget(self._environment_page)
+        self._log_window = QtWidgets.QDialog(self._window)
+        self._log_window.setWindowTitle('运行日志 - 幻之之')
+        self._log_window.resize(760, 480)
+        log_layout = QtWidgets.QVBoxLayout(self._log_window)
+        log_layout.addWidget(self._build_log_page())
+        self._window.closed.connect(self._log_window.close)
+        self._about_page = AboutPage()
+        self._about_page.log_button.clicked.connect(self._show_log_window)
+        self._pages.addWidget(self._about_page)
+        self._window.closed.connect(self._about_page.stop)
         self._window.closed.connect(self._environment_page.stop)
+        self._window.closed.connect(self._cloud_page.cancel)
         content_layout.addWidget(self._pages)
         root.addWidget(content, 1)
         self._navigation.currentRowChanged.connect(self._show_page)
@@ -381,6 +405,19 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             self._sync_codex_options()
             self._ai_status.setText(f'保存 AI 设置失败：{exc}')
 
+    def _show_log_window(self) -> None:
+        self._load_log()
+        self._log_window.showNormal()
+        self._log_window.raise_()
+        self._log_window.activateWindow()
+
+    def _copy_log(self) -> None:
+        QtWidgets.QApplication.clipboard().setText(self._log_view.toPlainText())
+
+    def _open_log_folder(self) -> None:
+        if not QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self._log_path.parent))):
+            self.error.emit('无法打开日志文件夹')
+
     def _build_log_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
@@ -396,6 +433,15 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         layout.addWidget(title)
         layout.addWidget(detail)
         layout.addWidget(self._log_view, 1)
+        actions = QtWidgets.QHBoxLayout()
+        copy = QtWidgets.QPushButton('复制日志')
+        copy.clicked.connect(self._copy_log)
+        folder = QtWidgets.QPushButton('打开日志文件夹')
+        folder.clicked.connect(self._open_log_folder)
+        actions.addWidget(copy)
+        actions.addWidget(folder)
+        actions.addStretch()
+        layout.addLayout(actions)
         return page
 
     def _build_tasks_page(self) -> QtWidgets.QWidget:
@@ -403,19 +449,21 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        title = QtWidgets.QLabel("任务列表")
+        title = QtWidgets.QLabel("技能列表")
         title.setObjectName("desktopPetTaskPageTitle")
-        detail = QtWidgets.QLabel("选择点击桌宠时显示的任务。修改后自动保存，不影响正在运行的任务。")
+        detail = QtWidgets.QLabel("选择要在桌宠菜单中显示的技能。显示设置自动保存，不会停止正在运行的技能。")
         detail.setObjectName("desktopPetSettingsRowDetail")
         detail.setWordWrap(True)
         self._task_groups = QtWidgets.QTabBar()
         self._task_groups.setObjectName("desktopPetTaskGroups")
-        self._task_groups.setAccessibleName("任务分组")
+        self._task_groups.setAccessibleName("技能分组")
         self._task_groups.setExpanding(False)
         self._task_groups.addTab("正式")
         self._task_groups.setTabData(0, "formal")
         self._task_groups.addTab("测试")
         self._task_groups.setTabData(1, "test")
+        self._task_groups.addTab("云端")
+        self._task_groups.setTabData(2, "cloud")
         self._task_cards = QtWidgets.QListWidget()
         self._task_cards.setObjectName("desktopPetTaskCards")
         self._task_cards.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
@@ -434,16 +482,104 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._task_descriptors = None
         self._task_items: dict[str, QtWidgets.QListWidgetItem] = {}
         self._task_switches: dict[str, ToggleSwitch] = {}
-        self._task_log_switches: dict[str, ToggleSwitch] = {}
         self._task_titles: dict[str, QtWidgets.QLabel] = {}
         self._task_details: dict[str, QtWidgets.QToolButton] = {}
-        layout.addWidget(title)
-        layout.addWidget(detail)
+        heading = QtWidgets.QHBoxLayout()
+        heading.addWidget(title)
+        heading.addStretch()
+        self._open_tasks_directory = QtWidgets.QPushButton('打开正式技能文件夹')
+        self._open_tasks_directory.setEnabled(self._tasks is not None)
+        self._open_tasks_directory.clicked.connect(self._open_task_directory)
+        heading.addWidget(self._open_tasks_directory)
+        self._import_button = QtWidgets.QPushButton('导入技能')
+        self._import_button.setEnabled(self._tasks is not None)
+        self._import_button.clicked.connect(self._import_tasks)
+        heading.addWidget(self._import_button)
+        layout.addLayout(heading)
         layout.addWidget(self._task_groups)
-        layout.addWidget(self._task_cards, 1)
+        layout.addWidget(detail)
+        self._task_detail = detail
+        self._task_content = QtWidgets.QStackedWidget()
+        self._task_content.addWidget(self._task_cards)
+        self._cloud_page = CloudSkillsPage(self._tasks)
+        self._task_content.addWidget(self._cloud_page)
+        layout.addWidget(self._task_content, 1)
         self._task_groups.currentChanged.connect(self._filter_task_group)
         self._sync_tasks()
         return page
+
+    def _open_task_directory(self) -> None:
+        if self._tasks is None:
+            return
+        group = self._task_groups.tabData(self._task_groups.currentIndex())
+        if group not in {'formal', 'test'}:
+            return
+        directory = self._tasks.test_tasks_root if group == 'test' else self._tasks.tasks_root
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            if not QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory))):
+                raise OSError('无法打开文件夹')
+        except Exception as exc:
+            self.error.emit(f'打开技能目录失败：{exc}')
+
+    def _import_tasks(self) -> None:
+        if self._tasks is None:
+            return
+        if self._skill_import is not None:
+            QtWidgets.QMessageBox.information(self._window, '导入技能', '正在导入技能，请稍候。')
+            return
+        if self._tasks.process.state != 'idle' or self._tasks.external_work_active:
+            QtWidgets.QMessageBox.information(self._window, '导入技能', '请先停止正在运行或开发的技能。')
+            return
+        filenames, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self._window, '选择技能 ZIP（可多选）', '', 'ZIP 压缩包 (*.zip)')
+        if not filenames:
+            return
+        try:
+            dialog = ImportSkillsDialog(self._tasks, filenames, self._window)
+            self._skill_import = dialog
+            dialog.exec()
+            self._skill_import = None
+            if dialog.count:
+                self._task_groups.setCurrentIndex(0)
+            dialog.deleteLater()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self._window, '导入失败', str(exc))
+
+    def _import_dropped_tasks(self, filenames: list[str]) -> None:
+        if self._closed or self._tasks is None:
+            return
+        if self._skill_import is not None:
+            self._pet.show_notification('正在导入技能，请等这批完成后再拖入。')
+            return
+        if self._tasks.process.state != 'idle' or self._tasks.external_work_active:
+            self._pet.show_notification('请先停止正在运行或开发的技能，再拖入 ZIP。')
+            return
+        try:
+            dialog = ImportSkillsDialog(self._tasks, filenames, self._window)
+        except Exception as exc:
+            self._pet.show_notification(f'无法导入技能：{exc}')
+            return
+        self._skill_import = dialog
+        dialog.progress_message.connect(self._pet.show_notification)
+        dialog.completed.connect(self._dropped_import_finished)
+        self._pet.show_notification(f'收到 {len(filenames)} 个技能包，正在校验并导入…', 60000)
+
+    def _dropped_import_finished(self) -> None:
+        dialog = self.sender()
+        if dialog is not self._skill_import:
+            return
+        self._skill_import = None
+        message = dialog.status.text()
+        failures = [line for line in dialog.results.toPlainText().splitlines() if '：未导入 — ' in line]
+        if failures:
+            message += '\n' + '\n'.join(line[:160] for line in failures[:3])
+            if len(failures) > 3:
+                message += f'\n另有 {len(failures) - 3} 个包导入失败。'
+        if dialog.count:
+            message += '\n已加入正式技能，可点击桌宠使用。'
+        self._pet.show_notification(message)
+        dialog.deleteLater()
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if self._closed:
@@ -483,6 +619,14 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         if self._closed:
             return
         selected_group = self._task_groups.tabData(self._task_groups.currentIndex())
+        is_cloud = selected_group == "cloud"
+        self._open_tasks_directory.setVisible(not is_cloud)
+        self._open_tasks_directory.setText('打开测试技能文件夹' if selected_group == 'test' else '打开正式技能文件夹')
+        self._open_tasks_directory.setToolTip('打开测试技能文件夹' if selected_group == 'test' else '打开正式技能文件夹')
+        self._task_content.setCurrentIndex(1 if is_cloud else 0)
+        self._task_detail.setVisible(not is_cloud)
+        if is_cloud:
+            return
         visible_count = 0
         for item in self._task_items.values():
             hidden = item.data(QtCore.Qt.ItemDataRole.UserRole) != selected_group
@@ -490,7 +634,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
                 item.setHidden(hidden)
             if not hidden:
                 visible_count += 1
-        self._task_empty_label.setText("暂无正式任务。" if selected_group == "formal" else "暂无测试任务。")
+        self._task_empty_label.setText("暂无正式技能。" if selected_group == "formal" else "暂无测试技能。")
         self._task_empty_label.adjustSize()
         self._task_empty_label.setVisible(visible_count == 0)
         self._task_cards.doItemsLayout()
@@ -523,28 +667,20 @@ class DesktopPetSettingsComponent(QtCore.QObject):
                     preferences["name"], QtCore.Qt.TextElideMode.ElideRight, title.width()
                 ))
                 detail = self._task_details[task_id]
-                description = escape(preferences["description"] or "暂无任务说明。").replace("\n", "<br>")
+                description = escape(preferences["description"] or "暂无技能说明。").replace("\n", "<br>")
                 detail.setToolTip(f"<qt>{description}</qt>")
-                detail.setAccessibleName(f"{preferences['name']}的任务说明")
-                detail.setAccessibleDescription(preferences["description"] or "暂无任务说明。")
+                detail.setAccessibleName(f"{preferences['name']}的技能说明")
+                detail.setAccessibleDescription(preferences["description"] or "暂无技能说明。")
                 title.parentWidget().findChild(QtWidgets.QToolButton, "desktopPetTaskEdit").setAccessibleName(
                     f"编辑{preferences['name']}"
                 )
                 switch.setAccessibleName(f"显示{preferences['name']}")
-                log_switch = self._task_log_switches[task_id]
-                log_switch.setAccessibleName(f"{preferences['name']}运行时显示日志")
-                if log_switch.isChecked() != preferences["show_logs"]:
-                    log_switch.blockSignals(True)
-                    log_switch.setChecked(preferences["show_logs"])
-                    log_switch.thumbPosition = float(preferences["show_logs"])
-                    log_switch.blockSignals(False)
             self._filter_task_group()
             return
         self._task_descriptors = descriptors
         self._task_cards.clear()
         self._task_items = {}
         self._task_switches = {}
-        self._task_log_switches = {}
         self._task_titles = {}
         self._task_details = {}
         for descriptor in descriptors:
@@ -567,10 +703,10 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             detail.setIcon(self._window.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation))
             detail.setIconSize(QtCore.QSize(14, 14))
             detail.setFixedSize(18, 24)
-            description = escape(preferences["description"] or "暂无任务说明。").replace("\n", "<br>")
+            description = escape(preferences["description"] or "暂无技能说明。").replace("\n", "<br>")
             detail.setToolTip(f"<qt>{description}</qt>")
-            detail.setAccessibleName(f"{preferences['name']}的任务说明")
-            detail.setAccessibleDescription(preferences["description"] or "暂无任务说明。")
+            detail.setAccessibleName(f"{preferences['name']}的技能说明")
+            detail.setAccessibleDescription(preferences["description"] or "暂无技能说明。")
             detail.clicked.connect(
                 lambda _checked=False, button=detail: QtWidgets.QToolTip.showText(
                     button.mapToGlobal(QtCore.QPoint(0, button.height())), button.toolTip(), button
@@ -589,7 +725,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             )
             switch = self._switch(f"显示{preferences['name']}")
             switch.setFixedSize(30, 22)
-            switch.setToolTip("在点击桌宠时显示此任务")
+            switch.setToolTip("在点击桌宠时显示此技能")
             visible = self._tasks.is_task_visible(descriptor.key)
             switch.blockSignals(True)
             switch.setChecked(visible)
@@ -602,20 +738,6 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             label.setObjectName("desktopPetSettingsRowDetail")
             card_layout.addWidget(label)
             card_layout.addWidget(switch)
-            log_switch = self._switch(f"{preferences['name']}运行时显示日志")
-            log_switch.setFixedSize(30, 22)
-            log_switch.blockSignals(True)
-            log_switch.setChecked(preferences["show_logs"])
-            log_switch.thumbPosition = float(preferences["show_logs"])
-            log_switch.blockSignals(False)
-            log_switch.setToolTip("关闭后，运行气泡只显示“运行中”；运行日志仍会保存。")
-            log_switch.toggled.connect(
-                lambda checked, task_id=descriptor.key: self._set_task_logs_visible(task_id, checked)
-            )
-            log_label = QtWidgets.QLabel("日志")
-            log_label.setObjectName("desktopPetSettingsRowDetail")
-            card_layout.addWidget(log_label)
-            card_layout.addWidget(log_switch)
             card_layout.addSpacing(4)
             card_layout.addWidget(edit)
             item = QtWidgets.QListWidgetItem()
@@ -625,35 +747,30 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             self._task_cards.setItemWidget(item, card)
             self._task_items[descriptor.key] = item
             self._task_switches[descriptor.key] = switch
-            self._task_log_switches[descriptor.key] = log_switch
             self._task_titles[descriptor.key] = title
             self._task_details[descriptor.key] = detail
         self._filter_task_group()
         self._layout_task_cards()
-
-    def _set_task_logs_visible(self, task_id: str, visible: bool) -> None:
-        if self._tasks is None:
-            return
-        try:
-            preferences = self._tasks.get_task_preferences(task_id)
-            preferences["show_logs"] = visible
-            self._tasks.set_task_preferences(task_id, **preferences)
-        except Exception as exc:
-            self._sync_tasks()
-            self.error.emit(f"更新任务日志显示设置失败：{exc}")
 
     def _edit_task(self, task_id: str) -> None:
         if self._tasks is None:
             return
         preferences = self._tasks.get_task_preferences(task_id)
         dialog = QtWidgets.QDialog(self._window)
-        dialog.setWindowTitle("编辑任务")
+        dialog.setWindowTitle("编辑技能")
         dialog.resize(420, 320)
         layout = QtWidgets.QVBoxLayout(dialog)
-        layout.addWidget(QtWidgets.QLabel("任务名称"))
+        export_row = QtWidgets.QHBoxLayout()
+        export_row.addStretch()
+        export = QtWidgets.QPushButton("导出技能")
+        export.setObjectName("taskExport")
+        export.setAutoDefault(False)
+        export_row.addWidget(export)
+        layout.addLayout(export_row)
+        layout.addWidget(QtWidgets.QLabel("技能名称"))
         name = QtWidgets.QLineEdit(preferences["name"])
         name.setObjectName("taskNameEdit")
-        name.setAccessibleName("任务名称")
+        name.setAccessibleName("技能名称")
         layout.addWidget(name)
         group = QtWidgets.QLabel('当前分组：' + ('测试' if preferences['group'] == 'test' else '正式'))
         group.setObjectName('taskGroupLabel')
@@ -661,11 +778,16 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         move = QtWidgets.QPushButton('加入正式' if preferences['group'] == 'test' else '移回测试')
         move.setObjectName('taskGroupMove')
         move.setAccessibleName(move.text())
-        layout.addWidget(move)
-        layout.addWidget(QtWidgets.QLabel("任务介绍"))
+        move.setAutoDefault(False)
+        move.setStyleSheet('QPushButton { border: 1px solid #aebbc7; background: #ffffff; }'
+                          'QPushButton:hover { border-color: #405d52; background: #e4e9f0; }'
+                          'QPushButton:pressed { background: #d8e0ea; }'
+                          'QPushButton:focus { border-color: #405d52; }')
+        layout.addWidget(move, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(QtWidgets.QLabel("技能介绍"))
         description = QtWidgets.QPlainTextEdit(preferences["description"])
         description.setObjectName("taskDescriptionEdit")
-        description.setAccessibleName("任务介绍")
+        description.setAccessibleName("技能介绍")
         layout.addWidget(description, 1)
         error_label = QtWidgets.QLabel()
         error_label.setObjectName("taskEditError")
@@ -691,6 +813,26 @@ class DesktopPetSettingsComponent(QtCore.QObject):
                 return
             dialog.accept()
 
+        def export_current() -> None:
+            if name.text() != preferences['name'] or description.toPlainText() != preferences['description']:
+                error_label.setText('请先保存修改，再打开编辑页导出。')
+                return
+            filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+                dialog, '导出技能', preferences['name'] + '.zip', 'ZIP 压缩包 (*.zip)')
+            if not filename:
+                return
+            destination = Path(filename)
+            try:
+                current = self._tasks.get_task_preferences(task_id)
+                export_skill(self._tasks.catalog.get(task_id), destination,
+                             description=current['description'])
+            except Exception as exc:
+                error_label.setText(f'导出失败：{exc}')
+                return
+            error_label.clear()
+            QtWidgets.QMessageBox.information(dialog, '导出完成', f'技能已导出到：\n{destination}')
+
+        export.clicked.connect(export_current)
         buttons.accepted.connect(save_changes)
         buttons.rejected.connect(dialog.reject)
         def move_task() -> None:
@@ -741,7 +883,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             self._tasks.set_task_visible(task_id, visible)
         except Exception as exc:
             self._sync_tasks()
-            self.error.emit(f"更新任务显示设置失败：{exc}")
+            self.error.emit(f"更新技能显示设置失败：{exc}")
 
     def _build_general_card(self) -> QtWidgets.QFrame:
         card = QtWidgets.QFrame()
@@ -833,7 +975,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             self._tasks is not None and self._tasks.process.state != "idle"
             or self._settings is not None and self._settings.ai_work_active()
         )
-        reason = "任务或 AI 正在工作，结束后可切换。" if busy else ""
+        reason = "技能或 AI 正在工作，结束后可切换。" if busy else ""
         mode = self._settings.get_input_mode() if self._settings else "background"
         for control, value in ((self._input_mode_combo, mode), (self._theme_combo, self._pet.theme)):
             control.blockSignals(True)

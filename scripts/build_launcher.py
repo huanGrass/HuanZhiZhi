@@ -36,8 +36,9 @@ def build_launcher(root, output):
         result = subprocess.run(
             [str(compiler), "/nologo", "/target:winexe", "/platform:x64", "/optimize+",
              "/debug-", "/utf8output", "/reference:System.Windows.Forms.dll",
+             "/reference:System.Drawing.dll", "/reference:System.IO.Compression.FileSystem.dll",
              f"/out:{executable}", f"/win32icon:{icon}",
-             str(root / "scripts/launcher.cs"), str(metadata)],
+             str(root / "scripts/launcher.cs"), str(root / "scripts/setup_environment.cs"), str(metadata)],
             capture_output=True, text=True, encoding="utf-8", timeout=30,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )

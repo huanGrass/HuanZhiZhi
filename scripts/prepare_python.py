@@ -94,11 +94,18 @@ def setup_project_python(destination, project_root):
     path_files[0].write_text(
         ".\nLib\nDLLs\nLib/site-packages\n../src\n..\nimport site\n", encoding="utf-8",
     )
-    subprocess.run(
-        [str(destination / "python.exe"), "-I", "-X", "utf8", "-m", "pip", "install",
-         "--only-binary=:all:", "-r", str(project_root / "requirements.txt")],
-        check=True,
-    )
+    command = [
+        str(destination / "python.exe"), "-I", "-X", "utf8", "-m", "pip",
+        "--isolated", "--disable-pip-version-check", "install",
+        "--only-binary=:all:", "--timeout", "15", "--retries", "1",
+        "-r", str(project_root / "requirements.txt"),
+    ]
+    print("正在使用清华镜像安装项目依赖…", flush=True)
+    try:
+        subprocess.run(command + ["--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple"], check=True)
+    except subprocess.CalledProcessError:
+        print("清华镜像安装失败，正在改用 PyPI 官方源重试…", flush=True)
+        subprocess.run(command + ["--index-url", "https://pypi.org/simple"], check=True)
     subprocess.run([str(destination / "python.exe"), "-I", "-X", "utf8", "-m", "pip", "check"], check=True)
     return verify_python(destination)
 

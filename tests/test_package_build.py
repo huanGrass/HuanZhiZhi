@@ -98,20 +98,6 @@ class PackageBuildTests(unittest.TestCase):
         self.assertEqual(json.loads((output / "update-info.json").read_text())["task"], "demo")
         self.assertEqual(fingerprint_tree(self.bundle), before)
 
-    def test_brick_update_excludes_reference_samples_but_keeps_runtime_assets(self):
-        task_id = "砖了个砖提示"
-        directory = self.root / "tasks" / task_id
-        (self.root / "tasks/demo").rename(directory)
-        for name in ("reference.png", "reference_hose.png"):
-            (directory / "assets" / name).write_bytes(b"private test sample")
-        output = Path(self.temp.name) / "brick-update"
-        with patch("scripts.build_package.TaskCatalog") as catalog:
-            catalog.return_value.reload.return_value = (SimpleNamespace(id=task_id),)
-            build_package(self.root, output, task=task_id, base_bundle=self.bundle)
-        copied = output / "tasks" / task_id
-        self.assertFalse((copied / "tests").exists())
-        self.assertEqual({p.name for p in (copied / "assets").iterdir()}, {"version.txt"})
-
     def test_full_package_includes_dependency_instructions_without_local_components(self):
         dependencies = self.root / "dependencies"
         (dependencies / "engine/models").mkdir(parents=True)

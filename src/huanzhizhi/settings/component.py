@@ -401,9 +401,9 @@ class SettingsComponent:
             ):
                 raise SettingsError("task preferences require name, description and show_logs")
             if 'name' in preferences and (not isinstance(preferences["name"], str) or not preferences["name"].strip()):
-                raise SettingsError("任务名称不能为空")
+                raise SettingsError("技能名称不能为空")
             if not isinstance(preferences["description"], str):
-                raise SettingsError("任务介绍必须是文字")
+                raise SettingsError("技能介绍必须是文字")
             if not isinstance(preferences["show_logs"], bool):
                 raise SettingsError("任务日志显示设置必须是布尔值")
             if preferences.get("group", "formal") not in ("formal", "test"):

@@ -74,10 +74,43 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
             if gc_enabled:
                 gc.enable()
 
+    def test_cloud_tab_and_responsive_cards(self) -> None:
+        from tests.test_cloud_skills import entry
+        cloud = self.panel._cloud_page
+        cloud._loaded = True
+        cloud._items = [entry(), {**entry(), 'id': '砖了个砖提示', 'category': '游戏助手'}]
+        cloud._render()
+        self.panel._navigation.setCurrentRow(1)
+        self.panel.window.resize(1100, 760)
+        self.panel.window.show()
+        self.panel._task_groups.setCurrentIndex(2)
+        self.app.processEvents()
+        self.assertIs(self.panel._task_content.currentWidget(), cloud)
+        self.assertEqual(cloud._grid.getItemPosition(0)[:2], (0, 0))
+        self.assertEqual(cloud._grid.getItemPosition(1)[:2], (0, 1))
+        self.assertGreater(cloud._cards[1].x(), cloud._cards[0].x())
+        self.panel._task_groups.setCurrentIndex(0)
+        self.assertIs(self.panel._task_content.currentWidget(), self.panel._task_cards)
+
+    def test_task_tabs_stay_in_place_when_switching_groups(self) -> None:
+        self.panel._cloud_page._loaded = True
+        self.panel._navigation.setCurrentRow(1)
+        self.panel.window.show()
+        self.app.processEvents()
+        tabs = self.panel._task_groups
+        position = tabs.mapTo(self.panel.window, QtCore.QPoint(0, 0))
+        for index in (2, 1, 0, 2, 0):
+            tabs.setCurrentIndex(index)
+            self.app.processEvents()
+            self.assertEqual(tabs.mapTo(self.panel.window, QtCore.QPoint(0, 0)), position)
+
     def test_panel_uses_sidebar_and_card_layout(self) -> None:
         self.assertEqual(self.panel.window.windowTitle(), "幻之之设置")
         self.assertEqual(self.panel._navigation.count(), 5)
         self.panel._navigation.setCurrentRow(4)
+        self.assertIs(self.panel._pages.currentWidget(), self.panel._about_page)
+        self.assertIsNone(self.panel._about_page._reply)
+        self.panel._navigation.setCurrentRow(3)
         self.assertEqual(self.panel._navigation.currentItem().text(), "外部组件")
         self.assertIs(self.panel._pages.currentWidget(), self.panel._environment_page)
         self.panel._navigation.setCurrentRow(0)
@@ -86,7 +119,9 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
 
     def test_log_page_loads_current_log_and_appends_live_messages(self) -> None:
         self.panel.show()
-        self.panel._navigation.setCurrentRow(1)
+        self.panel._navigation.setCurrentRow(4)
+        self.panel._about_page.log_button.click()
+        self.assertTrue(self.panel._log_window.isVisible())
         self.assertEqual(self.panel._log_view.toPlainText(), "[12:00:00] 已启动\n")
 
         self.panel.append_log("实时消息")
@@ -94,6 +129,16 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._log_view.toPlainText(), "[12:00:00] 已启动\n实时消息\n")
         self.assertFalse(hasattr(self.panel, "_refresh_log_button"))
         self.assertFalse(hasattr(self.panel, "_copy_log_button"))
+        buttons = {button.text(): button for button in self.panel._log_window.findChildren(QtWidgets.QPushButton)}
+        buttons['复制日志'].click()
+        self.assertEqual(QtWidgets.QApplication.clipboard().text(), self.panel._log_view.toPlainText())
+        from PySide6 import QtGui
+        with mock.patch.object(QtGui.QDesktopServices, 'openUrl', return_value=True) as opener:
+            buttons['打开日志文件夹'].click()
+            self.assertEqual(Path(opener.call_args.args[0].toLocalFile()), self.log_path.parent)
+        self.panel._log_window.close()
+        self.assertFalse(self.panel._log_window.isVisible())
+        self.assertTrue(self.panel.window.isVisible())
 
 
     def test_mouse_control_updates_pet_and_follows_external_changes(self) -> None:
@@ -185,7 +230,7 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
 
     def test_compact_tasks_reflow_without_clipping_controls(self) -> None:
         descriptors = tuple(
-            TaskDescriptor(str(index), "超长任务名称" * 20 if index == 0 else f"任务 {index}", "任务说明", Path("task.py"))
+            TaskDescriptor(str(index), "超长技能名称" * 20 if index == 0 else f"技能 {index}", "技能说明", Path("task.py"))
             for index in range(16)
         )
         host = mock.Mock()
@@ -193,12 +238,12 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
         host.is_task_visible.return_value = True
         host.get_task_preferences.side_effect = lambda task_id: {
             "name": descriptors[int(task_id)].name,
-            "description": "任务说明 <原文>\n第二行",
+            "description": "技能说明 <原文>\n第二行",
             "show_logs": True,
         }
         self.panel.close()
         self.panel = DesktopPetSettingsComponent(self.pet, self.log_path, tasks=host)
-        self.panel._navigation.setCurrentRow(2)
+        self.panel._navigation.setCurrentRow(1)
         self.panel.window.show()
         cards = self.panel._task_cards
         for width, columns in ((1040, 2), (640, 1), (1440, 3), (1040, 2)):
@@ -233,14 +278,14 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
         task_dir = root / "demo"
         task_dir.mkdir(parents=True)
         (task_dir / "task.py").write_text(TASK_SCRIPT, encoding="utf-8")
-        write_skill_manifest(task_dir / "task.py", name="演示任务")
+        write_skill_manifest(task_dir / "task.py", name="演示技能")
         settings = SettingsComponent(Path(self.temp.name) / "settings.ini")
         host = TaskHostComponent(self.pet, root, settings=settings)
         self.panel.close()
         self.panel = DesktopPetSettingsComponent(self.pet, self.log_path, tasks=host)
         try:
             self.panel.show()
-            self.panel._navigation.setCurrentRow(2)
+            self.panel._navigation.setCurrentRow(1)
             self.assertTrue(self.panel._task_switches["demo"].isChecked())
             host.presentation.handle_pet_clicked()
             QtTest.QTest.mouseClick(
@@ -250,10 +295,8 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
             self.assertEqual(host.presentation._tasks, ())
             self.assertEqual(settings.get_hidden_task_ids(), ("demo",))
             self.assertFalse(self.panel._task_switches["demo"].isChecked())
-            QtTest.QTest.mouseClick(
-                self.panel._task_log_switches["demo"], QtCore.Qt.MouseButton.LeftButton
-            )
-            self.assertFalse(host.get_task_preferences("demo")["show_logs"])
+            self.assertFalse(hasattr(self.panel, '_task_log_switches'))
+            host.set_task_preferences('demo', name='demo', description='', show_logs=False)
 
             def edit_dialog(dialog):
                 name = dialog.findChild(QtWidgets.QLineEdit, "taskNameEdit")
@@ -262,11 +305,21 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
                 self.assertEqual(group.text(), "当前分组：正式")
                 buttons = dialog.findChild(QtWidgets.QDialogButtonBox)
                 save = next(button for button in buttons.buttons() if button.text() == "保存")
+                export = dialog.findChild(QtWidgets.QPushButton, 'taskExport')
+                destination = Path(self.temp.name) / 'export.zip'
+                with mock.patch.object(QtWidgets.QFileDialog, 'getSaveFileName', return_value=(str(destination), '')), mock.patch.object(QtWidgets.QMessageBox, 'information'):
+                    export.click()
+                self.assertTrue(destination.exists())
+                name.setText('未保存')
+                with mock.patch.object(QtWidgets.QFileDialog, 'getSaveFileName') as choose:
+                    export.click()
+                    choose.assert_not_called()
+                self.assertIn('先保存', dialog.findChild(QtWidgets.QLabel, 'taskEditError').text())
                 name.setText("  ")
                 save.click()
-                self.assertIn("任务名称不能为空", dialog.findChild(QtWidgets.QLabel, "taskEditError").text())
+                self.assertIn("技能名称不能为空", dialog.findChild(QtWidgets.QLabel, "taskEditError").text())
                 self.assertEqual(host.get_task_preferences("demo")["name"], "demo")
-                name.setText("我的任务")
+                name.setText("我的技能")
                 description.setPlainText("我的介绍\n第二行")
                 save.click()
                 self.assertEqual(dialog.result(), QtWidgets.QDialog.DialogCode.Accepted)
@@ -278,40 +331,36 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
                 dialog.findChild(QtWidgets.QPushButton, "taskGroupMove").click()
                 return dialog.result()
             with mock.patch.object(QtWidgets.QDialog, "exec", move_dialog):
-                self.panel._edit_task("我的任务")
+                self.panel._edit_task("我的技能")
             self.panel._task_groups.setCurrentIndex(0)
-            self.assertTrue(self.panel._task_items["test/我的任务"].isHidden())
+            self.assertTrue(self.panel._task_items["test/我的技能"].isHidden())
             self.assertTrue(self.panel._task_empty_label.isVisible())
             self.assertEqual(self.panel._task_groups.tabText(0), "正式（0）")
             self.assertEqual(self.panel._task_groups.tabText(1), "测试（1）")
             self.panel._task_groups.setCurrentIndex(1)
-            self.assertEqual(self.panel._task_titles["test/我的任务"].text(), "我的任务")
-            self.assertEqual(self.panel._task_details["test/我的任务"].accessibleDescription(), "我的介绍\n第二行")
-            self.assertIn("我的介绍<br>第二行", self.panel._task_details["test/我的任务"].toolTip())
+            self.assertEqual(self.panel._task_titles["test/我的技能"].text(), "我的技能")
+            self.assertEqual(self.panel._task_details["test/我的技能"].accessibleDescription(), "我的介绍\n第二行")
+            self.assertIn("我的介绍<br>第二行", self.panel._task_details["test/我的技能"].toolTip())
             self.panel.close()
             host.close()
             settings.close()
             settings = SettingsComponent(Path(self.temp.name) / "settings.ini")
             host = TaskHostComponent(self.pet, root, settings=settings)
-            self.assertFalse(host.is_task_visible("test/我的任务"))
+            self.assertFalse(host.is_task_visible("test/我的技能"))
             self.panel = DesktopPetSettingsComponent(self.pet, self.log_path, tasks=host)
-            self.assertTrue(self.panel._task_items["test/我的任务"].isHidden())
+            self.assertTrue(self.panel._task_items["test/我的技能"].isHidden())
             self.panel._task_groups.setCurrentIndex(1)
-            self.assertFalse(self.panel._task_switches["test/我的任务"].isChecked())
-            self.assertFalse(self.panel._task_log_switches["test/我的任务"].isChecked())
-            self.assertEqual(host.get_task_preferences("test/我的任务"), {
-                "name": "我的任务", "description": "我的介绍\n第二行", "show_logs": False,
+            self.assertFalse(self.panel._task_switches["test/我的技能"].isChecked())
+            self.assertEqual(host.get_task_preferences("test/我的技能"), {
+                "name": "我的技能", "description": "我的介绍\n第二行", "show_logs": False,
                 "group": "test",
             })
             QtTest.QTest.mouseClick(
-                self.panel._task_switches["test/我的任务"], QtCore.Qt.MouseButton.LeftButton
+                self.panel._task_switches["test/我的技能"], QtCore.Qt.MouseButton.LeftButton
             )
-            self.assertTrue(host.is_task_visible("test/我的任务"))
-            self.assertNotIn("test/我的任务", settings.get_hidden_task_ids())
-            QtTest.QTest.mouseClick(
-                self.panel._task_log_switches["test/我的任务"], QtCore.Qt.MouseButton.LeftButton
-            )
-            self.assertEqual(host.get_task_preferences("test/我的任务")["group"], "test")
+            self.assertTrue(host.is_task_visible("test/我的技能"))
+            self.assertNotIn("test/我的技能", settings.get_hidden_task_ids())
+            self.assertEqual(host.get_task_preferences("test/我的技能")["group"], "test")
         finally:
             self.panel.close()
             host.close()
@@ -319,7 +368,7 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
 
     def test_group_switch_reuses_widgets_and_keeps_hidden_tasks_current(self) -> None:
         descriptors = tuple(
-            TaskDescriptor(str(index), f"任务 {index}", "任务说明", Path("task.py"))
+            TaskDescriptor(str(index), f"技能 {index}", "技能说明", Path("task.py"))
             for index in range(30)
         )
         preferences = {
@@ -335,7 +384,7 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
         host.get_task_preferences.side_effect = lambda task_id: dict(preferences[task_id])
         self.panel.close()
         self.panel = DesktopPetSettingsComponent(self.pet, self.log_path, tasks=host)
-        self.panel._navigation.setCurrentRow(2)
+        self.panel._navigation.setCurrentRow(1)
         self.panel.window.show()
         self.app.processEvents()
         cards = self.panel._task_cards
@@ -362,7 +411,6 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(self.panel._task_titles["1"].text(), "已更新")
         self.assertEqual(self.panel._task_details["1"].accessibleDescription(), "新的说明")
-        self.assertFalse(self.panel._task_log_switches["1"].isChecked())
         self.assertIs(cards.itemWidget(self.panel._task_items["1"]), original_widgets["1"])
 
         preferences["1"]["group"] = "formal"

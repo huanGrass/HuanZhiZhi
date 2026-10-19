@@ -49,6 +49,58 @@ app.exec()
 '''
 
 
+
+def launcher_windows(pid):
+    native = ctypes.WinDLL('user32', use_last_error=True)
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    native.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    native.EnumChildWindows.argtypes = [wintypes.HWND, callback_type, wintypes.LPARAM]
+    native.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    native.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    native.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    native.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    windows = []
+
+    def text(window):
+        buffer = ctypes.create_unicode_buffer(32768)
+        native.SendMessageW(window, 0x000D, len(buffer), ctypes.addressof(buffer))
+        return buffer.value
+
+    @callback_type
+    def visit(window, _):
+        owner = wintypes.DWORD()
+        native.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if owner.value == pid:
+            children = []
+            @callback_type
+            def child(handle, _):
+                children.append((handle, text(handle)))
+                return True
+            native.EnumChildWindows(window, child, 0)
+            windows.append((window, text(window), children))
+        return True
+
+    native.EnumWindows(visit, 0)
+    return native, windows
+
+
+def wait_launcher_control(process, caption, timeout=10):
+    deadline = time.monotonic() + timeout
+    while process.poll() is None and time.monotonic() < deadline:
+        native, windows = launcher_windows(process.pid)
+        for window, title, children in windows:
+            for handle, text in children:
+                if text == caption:
+                    return native, handle
+        time.sleep(.05)
+    raise AssertionError(f'Launcher control not found: {caption}; {windows}')
+
+
+def click_launcher_control(process, caption):
+    native, handle = wait_launcher_control(process, caption)
+    native.PostMessageW(handle, 0x00F5, 0, 0)  # BM_CLICK, owned fixture only
+
+
 @unittest.skipUnless(sys.platform == 'win32', 'Windows launcher integration')
 class LauncherTests(unittest.TestCase):
     @classmethod
@@ -69,7 +121,7 @@ class LauncherTests(unittest.TestCase):
             python = root / 'python'
             python.mkdir()
             # Copy only the interpreter; reuse installed libraries through _pth.
-            for name in ('pythonw.exe', 'python311.dll', 'python3.dll',
+            for name in ('python.exe', 'pythonw.exe', 'python311.dll', 'python3.dll',
                          'vcruntime140.dll', 'vcruntime140_1.dll'):
                 shutil.copy2(runtime / name, python / name)
             (python / 'python311._pth').write_text('\n'.join(map(str, (
@@ -97,6 +149,47 @@ class LauncherTests(unittest.TestCase):
             time.sleep(.3)
             # Qt alone reports visible even when STARTUPINFO suppressed the HWND.
             self.assertEqual(observations, [{'qt': True, 'native': True}] * 2)
+
+
+    def test_declining_install_does_not_create_environment(self):
+        with tempfile.TemporaryDirectory(prefix='之之 decline ') as temporary:
+            root = Path(temporary)
+            (root / 'src/huanzhizhi').mkdir(parents=True)
+            (root / 'src/huanzhizhi/__main__.py').touch()
+            shutil.copy2(self.launcher, root / '幻之之.exe')
+            with subprocess.Popen([str(root / '幻之之.exe')]) as process:
+                try:
+                    click_launcher_control(process, '否(&N)')
+                    self.assertEqual(process.wait(timeout=5), 0)
+                    self.assertFalse((root / 'python').exists())
+                    self.assertFalse(list(root.glob('.setup-*')))
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+
+    def test_install_failure_can_retry_and_close_without_touching_old_environment(self):
+        with tempfile.TemporaryDirectory(prefix='之之 failure ') as temporary:
+            root = Path(temporary)
+            (root / 'src/huanzhizhi').mkdir(parents=True)
+            (root / 'src/huanzhizhi/__main__.py').touch()
+            (root / 'python').mkdir()
+            marker = root / 'python/preserved.txt'
+            marker.write_text('keep', encoding='utf-8')
+            shutil.copy2(self.launcher, root / '幻之之.exe')
+            with subprocess.Popen([str(root / '幻之之.exe')]) as process:
+                try:
+                    click_launcher_control(process, '是(&Y)')
+                    click_launcher_control(process, '重试')
+                    native, handle = wait_launcher_control(process, '关闭')
+                    _, windows = launcher_windows(process.pid)
+                    self.assertIn('requirements.txt', str(windows))
+                    native.PostMessageW(handle, 0x00F5, 0, 0)
+                    self.assertEqual(process.wait(timeout=5), 1)
+                    self.assertEqual(marker.read_text(encoding='utf-8'), 'keep')
+                    self.assertFalse(list(root.glob('.setup-*')))
+                finally:
+                    if process.poll() is None:
+                        process.kill()
 
     def test_exe_missing_runtime_shows_actionable_error(self):
         native = ctypes.WinDLL('user32', use_last_error=True)

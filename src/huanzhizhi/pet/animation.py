@@ -319,7 +319,7 @@ class PetAnimationController(QtCore.QObject):
             return
         self.move_feedback(target)
         self._held_feedback = False
-        self._begin(self._return_segments(self._pivot, self._mirrored, wait=8.))
+        self._begin(self._return_segments(self._pivot, self._mirrored, wait=.6))
 
     def show_hint(
         self, points: Sequence[QtCore.QPoint | QtCore.QPointF], kind: str = "click", *,

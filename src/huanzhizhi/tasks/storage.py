@@ -114,3 +114,104 @@ def publish_skill(source: Path, destination: Path, *, previous: Path | None = No
         if previous is not None:
             _move_skill(backup, previous)
         raise
+
+
+def export_skill(task, destination: Path, *, description: str) -> None:
+    """Export one saved skill, without executing it or changing its files."""
+    import os
+    import tempfile
+    import zipfile
+
+    executable = task.script_path.suffix.lower() == '.exe'
+    source = task.script_path if executable else task.script_path.parent
+    base = source.parent if executable else source
+    destination = destination.resolve()
+    if (not executable and destination.is_relative_to(source.resolve())):
+        raise ValueError('请将导出文件保存在技能目录之外')
+    files = skill_files(source)
+    manifest = skill_manifest_path(task.script_path)
+    if destination in {(base / name).resolve() for name in files}:
+        raise ValueError('导出文件不能覆盖技能文件')
+    payload = json.loads(manifest.read_text(encoding='utf-8'))
+    payload['id'] = task.id
+    payload.pop('name', None)
+    payload['description'] = description
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=destination.parent, suffix='.zip', delete=False) as stream:
+            temporary = Path(stream.name)
+        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            for name in sorted(files):
+                relative = Path(name)
+                if any(part.casefold() in {'.git', '.codex', '.agents'} for part in relative.parts):
+                    continue
+                path = base / relative
+                member = name if executable else f'{task.id}/{name}'
+                if path == manifest:
+                    archive.writestr(member, json.dumps(payload, ensure_ascii=False, indent=2) + '\n')
+                else:
+                    archive.write(path, member)
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def prepare_local_skill(archive: Path, workdir: Path) -> Path:
+    """Validate and stage a local ZIP as data; never run imported code."""
+    import stat
+    import zipfile
+    from huanzhizhi.component_install import _relative, _unpack
+    from huanzhizhi.tasks.catalog import TaskCatalog
+
+    workdir = workdir.resolve()
+    raw = workdir / 'raw'
+    raw.mkdir()
+    seen = set()
+    with zipfile.ZipFile(archive) as package:
+        entries = package.infolist()
+        if not entries or len(entries) > 2000 or sum(e.file_size for e in entries) > 80 * 1024 * 1024:
+            raise ValueError('技能包为空，或超过 2000 个条目 / 80 MB 解压大小限制')
+        for entry in entries:
+            path = _relative(entry.filename)
+            if not path.parts:
+                raise ValueError('技能包包含空路径')
+            for part in path.parts:
+                validate_skill_name(part)
+                if part.casefold() in {'.git', '.codex', '.agents'}:
+                    raise ValueError('技能包不能包含仓库或代理配置')
+            kind = stat.S_IFMT(entry.external_attr >> 16)
+            if kind not in {0, stat.S_IFREG, stat.S_IFDIR} or entry.flag_bits & 1:
+                raise ValueError('技能包不能包含链接、特殊文件或加密文件')
+            key = path.as_posix().casefold()
+            if key in seen:
+                raise ValueError('技能包包含重复路径')
+            seen.add(key)
+    _unpack({'destination': 'raw', 'archive_prefix': ''}, archive, workdir)
+    if (raw / 'skill.json').is_file():
+        payload = json.loads((raw / 'skill.json').read_text(encoding='utf-8'))
+        name = payload.get('id') if isinstance(payload, dict) else None
+        if not isinstance(name, str):
+            raise ValueError('技能清单缺少有效 ID')
+        validate_skill_name(name)
+        container = workdir / 'normalized'
+        container.mkdir()
+        raw.rename(container / name)
+    else:
+        container = raw
+    tasks = TaskCatalog(container).reload()
+    if len(tasks) != 1:
+        raise ValueError('每个 ZIP 必须包含一个完整技能及 skill.json 清单')
+    task = tasks[0]
+    executable = task.script_path.suffix.lower() == '.exe'
+    source = task.script_path if executable else task.script_path.parent
+    allowed = {source, skill_manifest_path(source)} if executable else {source}
+    if set(container.iterdir()) != allowed:
+        raise ValueError('技能包包含技能目录以外的文件或多个技能')
+    payload = json.loads(skill_manifest_path(task.script_path).read_text(encoding='utf-8'))
+    if payload['id'] != task.id:
+        raise ValueError('技能清单 ID 与目录名称不一致')
+    if not executable:
+        for path in source.rglob('*.py'):
+            compile(path.read_bytes(), str(path), 'exec')
+    return source

@@ -20,3 +20,5 @@ output/
 .env
 .env.*
 !/.env.example
+/.setup-*/
+/python.backup-*/

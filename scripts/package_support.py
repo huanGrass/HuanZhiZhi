@@ -18,12 +18,7 @@ QT_MODULES = {"Core", "Gui", "Widgets", "Svg", "SvgWidgets", "Network",
 
 
 def task_ignore(directory, names):
-    ignored = set(shutil.ignore_patterns("tests", "__pycache__", "*.pyc", "*.pyo", "*.egg-info")(directory, names))
-    path = Path(directory)
-    if path.name == "assets" and path.parent.name == "砖了个砖提示":
-        # These two images are test fixtures, not runtime recognition templates.
-        ignored.update({"reference.png", "reference_hose.png"} & set(names))
-    return ignored
+    return shutil.ignore_patterns("tests", "__pycache__", "*.pyc", "*.pyo", "*.egg-info")(directory, names)
 
 
 def runtime_ignore(directory, names):

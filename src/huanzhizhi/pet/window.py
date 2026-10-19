@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from huanzhizhi.pet.constants import CLICK_DRAG_THRESHOLD, MIN_VISIBLE_FRACTION
@@ -11,6 +13,7 @@ from huanzhizhi.platform import WindowPolicy
 class PetWindow(QtWidgets.QWidget):
     """Own only the transparent pet surface and direct pointer interaction."""
 
+    skill_zips_dropped = QtCore.Signal(list)
     moved = QtCore.Signal(QtCore.QPoint)
     position_changing = QtCore.Signal(QtCore.QPoint)
     clicked = QtCore.Signal()
@@ -35,6 +38,7 @@ class PetWindow(QtWidgets.QWidget):
         self.setAutoFillBackground(False)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
         self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         self._window_policy = WindowPolicy(self)
         self._window_policy.set_input_passthrough(False, layered=True)
@@ -110,6 +114,36 @@ class PetWindow(QtWidgets.QWidget):
             self._clamped_axis(position.x(), self.width(), area.left(), area.right()),
             self._clamped_axis(position.y(), self.height(), area.top(), area.bottom()),
         )
+
+    def _dropped_zips(self, event) -> list[str]:
+        if not self.hit_test(event.position().toPoint()) or not event.mimeData().hasUrls():
+            return []
+        urls = event.mimeData().urls()
+        if not urls or any(not url.isLocalFile() for url in urls):
+            return []
+        paths = [Path(url.toLocalFile()) for url in urls]
+        if any(path.suffix.lower() != '.zip' or not path.is_file() for path in paths):
+            return []
+        return list(dict.fromkeys(str(path) for path in paths))
+
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
+        if self._dropped_zips(event):
+            event.setDropAction(QtCore.Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:
+        filenames = self._dropped_zips(event)
+        if filenames:
+            event.setDropAction(QtCore.Qt.DropAction.CopyAction)
+            event.accept()
+            self.skill_zips_dropped.emit(filenames)
+        else:
+            event.ignore()
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.MouseButton.LeftButton:

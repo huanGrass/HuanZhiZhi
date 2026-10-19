@@ -189,6 +189,14 @@ class TaskHostComponent(QtCore.QObject):
     def mouse_watcher(self) -> GlobalMouseWatcher:
         return self._mouse
 
+    @property
+    def tasks_root(self) -> Path:
+        return self._tasks_root
+
+    @property
+    def test_tasks_root(self) -> Path:
+        return self._test_tasks_root
+
     def reload_tasks(self) -> None:
         self._ensure_open()
         catalog = TaskCatalog(self._tasks_root, test_tasks_root=self._test_tasks_root)

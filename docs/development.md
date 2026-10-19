@@ -35,9 +35,9 @@ Windows 原生窗口恢复测试需要 `QT_QPA_PLATFORM=windows`，无界面测�
 
 ## 完整包
 
-安装包根目录的 `README.md` 使用 `docs/portable-readme.md`，源码仓库的 README 只说明源码运行方式。
+安装包根目录的 `README.md` 使用 `docs/portable-readme.md`，源码仓库的 README 说明双击启动和首次自动安装。
 
-完整包自动编译 `幻之之.exe` 启动器，源码位于 `scripts/launcher.cs`。构建使用 Windows 系统的 `.NET Framework 4.x` C# 编译器（`Framework64/v4.0.30319/csc.exe`），不需要安装 .NET SDK 或 PyInstaller；图标由现有应用 PNG 转换生成。启动器定位自身目录中的 `python/pythonw.exe`，不依赖当前工作目录或系统 Python；单实例仍由宿主负责。
+完整包自动编译 `幻之之.exe` 启动器，源码位于 `scripts/launcher.cs` 和 `scripts/setup_environment.cs`。源码仓库跟踪根目录的启动器；修改启动器后，先用 `python/python.exe scripts/build_launcher.py --output build/幻之之.exe` 生成新文件，验证后替换根目录版本。构建使用 Windows 系统的 `.NET Framework 4.x` C# 编译器（`Framework64/v4.0.30319/csc.exe`），不需要安装 .NET SDK 或 PyInstaller；图标由现有应用 PNG 转换生成。启动器定位自身目录中的 `python/pythonw.exe`，不依赖当前工作目录或系统 Python；单实例仍由宿主负责。
 
 `dist/<版本>/` 只放最终交付的 ZIP、校验值和验证记录。未压缩构建与下载缓存放在 `build/`，验证日志放在 `artifacts/`。构建输出目录必须不存在，重建前先移走旧输出：
 
@@ -46,7 +46,7 @@ Windows 原生窗口恢复测试需要 `QT_QPA_PLATFORM=windows`，无界面测�
 .\python\python.exe -X utf8 scripts/verify_package.py build/portable-0.2.0 --report-dir artifacts/portable-check
 ```
 
-完整包默认不附带技能。显式指定技能时，仅打包其运行代码、素材和说明。完整包与单技能更新共用 `task_ignore` 规则，排除技能 `tests/` 和砖了个砖的两张 `assets/reference*.png` 测试样本；其他技能的运行素材仍正常复制。不复制 `test_tasks/`、本机外部引擎/模型、历史日志或草稿；`dependencies/` 仅附 README。`LICENSE`、`licenses/`、文档和 AI 开发知识随包复制。`build-info.json` 记录版本、依赖、技能及宿主/运行环境校验值。
+完整包默认不附带技能。显式指定技能时，仅打包其运行代码、素材和说明。完整包与单技能更新共用 `task_ignore` 规则，排除技能 `tests/` 和 Python 缓存，运行素材正常复制。不复制 `test_tasks/`、本机外部引擎/模型、历史日志或草稿；`dependencies/` 仅附 README。`LICENSE`、`licenses/`、文档和 AI 开发知识随包复制。`build-info.json` 记录版本、依赖、技能及宿主/运行环境校验值。
 
 现有代码仅处理静态截图，发行包排除 OpenCV 的 FFmpeg 视频插件及可选 Mesa 软件 OpenGL 渲染器；不承诺这两项可选能力。
 
@@ -103,3 +103,23 @@ Qt 过滤规则同时用于复制和兼容性指纹，因此未分发的开发�
 测试模块中的 Qt 全局对象会相互影响，完整回归使用独立进程逐模块运行，保留每个退出码；单个模块可运行 `python/python.exe -m unittest tests.test_task_catalog -q`。游戏截图和技能专属测试由对应技能的私有测试目录管理，宿主仅保留协议及公共模块测试。
 
 发布前核对已跟踪文件和构建清单；仅有 `.gitignore` 不会移除已经跟踪的内容。提交、推送和发布是分别进行的步骤。
+
+## 云端技能目录
+
+「技能列表 → 云端」按需读取 [HuanZhiZhi-Skills](https://github.com/huanGrass/HuanZhiZhi-Skills) 的 `main/catalog.json`，仅打开该页或点击刷新时联网。分类由清单提供；本地技能仍可离线使用。
+
+发布技能时，先将以技能名为顶层目录的 ZIP（含运行文件及许可证）提交到技能仓库，再更新清单：`format: 1`，`skills` 条目包含 `id`、`category`、`description`、`version`、`size`、`sha256` 和 `url`。下载 URL 必须指向该仓库固定的 40 位提交下的 `packages/*.zip`，避免包内容随分支变更。公开仓库只放公开技能，不包含内部技能、测试截图或账号资料。
+
+宿主复用组件下载和解压逻辑，检查包大小、SHA-256、路径、清单及 Python 语法后发布到 `tasks/` 并刷新列表。安装不执行技能代码，不覆盖同名目录或旧版可执行技能；运行或开发技能时暂停安装入口。
+
+## 首次启动安装
+
+启动器检查项目内 Python 和必要模块；环境完整时直接启动，缺失时经用户确认后显示原生安装窗口。下载使用官方 Python 3.11.9 x64 嵌入包和 pip 24.0 wheel，并校验固定 SHA-256；依赖按 `requirements.txt` 优先从清华 PyPI 镜像安装，失败后自动改用 PyPI 官方源；仅允许二进制 wheel。取消安装不会触发换源，两个源都失败时保留错误日志并允许重试。开发准备脚本采用相同顺序。无需系统 Python 或管理员权限，项目目录需要可写。下载显示字节进度，依赖安装显示阶段和 pip 日志，支持取消及失败重试。
+
+安装先在项目下的唯一临时目录完成并验证，成功后才移入 `python/`；已有不完整环境保留为 `python.backup-<随机标识>/`，用户确认不再需要后可自行移除。安装不修改系统 PATH。运行时目录结构和隔离路径与 `prepare_python.py` 一致，开发环境仍可使用该脚本。
+
+## 关于页面与更新检查
+
+「设置 → 关于幻之之」直接读取随源码和发行包保留的 `pyproject.toml` 版本。仅点击检查按钮时请求官方仓库 GitHub Releases API，不自动下载或覆盖安装；关闭设置会取消请求。正式发行版标签使用 `v主版本.次版本.修订号`（也支持省略 v），忽略草稿和预发布版本。新版本入口打开对应发行版页面，更新说明按纯文本显示。
+
+无正式发行版、已是最新、发现更新以及网络错误分别显示；限流、超时或响应异常不会报告为“已是最新版”。项目地址与下载页均通过系统浏览器打开，群号可复制，下载失败时提示前往 QQ 群查看群文件。

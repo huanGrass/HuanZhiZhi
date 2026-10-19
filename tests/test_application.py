@@ -612,7 +612,11 @@ s.emit_finished('已停止','测试任务','结束',stopped_by_request=True)
     def test_original_settings_tasks_logs_mouse_and_scale(self):
         panel=self.host.pet_settings
         panel.show()
-        self.assertEqual([panel._navigation.item(i).text() for i in range(3)],['常规','运行日志','任务列表'])
+        self.assertEqual([panel._navigation.item(i).text() for i in range(panel._navigation.count())],
+                         ['常规','技能列表','AI 设置','外部组件','关于幻之之'])
+        panel._navigation.setCurrentRow(4)
+        panel._about_page.log_button.click()
+        self.assertTrue(panel._log_window.isVisible())
         self.host._append_log('恢复验证日志')
         self.assertIn('恢复验证日志',panel._log_view.toPlainText())
         self.host.pet.set_mouse_point_visible(True)
