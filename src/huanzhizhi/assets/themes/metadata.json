@@ -1,0 +1,672 @@
+{
+  "version": 1,
+  "themes": {
+    "ufo": {
+      "name": "星际飞碟",
+      "size_factor": 0.636,
+      "frames": {
+        "0": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            0,
+            0,
+            362,
+            362
+          ],
+          "anchor": [
+            184.14,
+            294.31
+          ],
+          "head": [
+            187,
+            142,
+            125
+          ],
+          "head_radius_x": 91
+        },
+        "1": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            362,
+            0,
+            362,
+            362
+          ],
+          "anchor": [
+            181.77,
+            294.09
+          ]
+        },
+        "2": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            724,
+            0,
+            362,
+            362
+          ],
+          "anchor": [
+            180.87,
+            293.98
+          ]
+        },
+        "3": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            1086,
+            0,
+            362,
+            362
+          ],
+          "anchor": [
+            179.87,
+            294.33
+          ]
+        },
+        "4": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            0,
+            368,
+            362,
+            356
+          ],
+          "anchor": [
+            183.29,
+            282.7
+          ],
+          "scale": 0.9834254143646409
+        },
+        "5": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            362,
+            368,
+            362,
+            356
+          ],
+          "anchor": [
+            181.72,
+            282.53
+          ],
+          "scale": 0.9834254143646409
+        },
+        "6": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            724,
+            368,
+            362,
+            356
+          ],
+          "anchor": [
+            181.01,
+            282.74
+          ],
+          "scale": 0.9834254143646409
+        },
+        "7": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            1086,
+            368,
+            362,
+            356
+          ],
+          "anchor": [
+            179.83,
+            282.51
+          ],
+          "scale": 0.9834254143646409
+        },
+        "8": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            0,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            183.9,
+            276.04
+          ]
+        },
+        "9": {
+          "sheet": "ufo/core.webp",
+          "rect": [
+            362,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            181.37,
+            276.03
+          ]
+        },
+        "10": {
+          "sheet": "ufo/contact-v2.webp",
+          "rect": [
+            0,
+            0,
+            656,
+            599
+          ],
+          "anchor": [
+            333.429,
+            457.369
+          ],
+          "point": [
+            551,
+            291
+          ],
+          "scale": 1.033025
+        },
+        "11": {
+          "sheet": "ufo/contact-v2.webp",
+          "rect": [
+            656,
+            0,
+            656,
+            599
+          ],
+          "anchor": [
+            331.37,
+            457.117
+          ],
+          "point": [
+            552,
+            328
+          ],
+          "scale": 1.033025
+        },
+        "12": {
+          "sheet": "ufo/contact-v2.webp",
+          "rect": [
+            0,
+            599,
+            656,
+            600
+          ],
+          "anchor": [
+            333.234,
+            456.11
+          ],
+          "point": [
+            549,
+            347
+          ],
+          "scale": 1.03475
+        },
+        "13": {
+          "sheet": "ufo/contact-v2.webp",
+          "rect": [
+            656,
+            599,
+            656,
+            600
+          ],
+          "anchor": [
+            331.242,
+            456.101
+          ],
+          "point": [
+            548,
+            290
+          ],
+          "scale": 1.03475
+        },
+        "14": {
+          "sheet": "ufo/contact-v2.webp",
+          "rect": [
+            656,
+            0,
+            656,
+            599
+          ],
+          "anchor": [
+            331.37,
+            457.117
+          ],
+          "point": [
+            552,
+            328
+          ],
+          "scale": 1.033025
+        },
+        "16": {
+          "sheet": "ufo/actions.webp",
+          "rect": [
+            0,
+            368,
+            362,
+            356
+          ],
+          "anchor": [
+            183.53,
+            284.08
+          ],
+          "scale": 0.9834254143646409
+        },
+        "17": {
+          "sheet": "ufo/actions.webp",
+          "rect": [
+            362,
+            368,
+            362,
+            356
+          ],
+          "anchor": [
+            181.38,
+            283.84
+          ],
+          "scale": 0.9834254143646409
+        },
+        "18": {
+          "sheet": "ufo/actions.webp",
+          "rect": [
+            724,
+            368,
+            362,
+            356
+          ],
+          "anchor": [
+            177.93,
+            283.95
+          ],
+          "scale": 0.9834254143646409
+        },
+        "19": {
+          "sheet": "ufo/actions.webp",
+          "rect": [
+            1086,
+            368,
+            362,
+            356
+          ],
+          "anchor": [
+            176.52,
+            284.17
+          ],
+          "scale": 0.9834254143646409
+        },
+        "20": {
+          "sheet": "ufo/actions.webp",
+          "rect": [
+            0,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            183.37,
+            284.73
+          ]
+        },
+        "21": {
+          "sheet": "ufo/actions.webp",
+          "rect": [
+            362,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            182.39,
+            284.39
+          ]
+        },
+        "22": {
+          "sheet": "ufo/actions.webp",
+          "rect": [
+            724,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            178.12,
+            284.56
+          ]
+        },
+        "23": {
+          "sheet": "ufo/actions.webp",
+          "rect": [
+            1086,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            176.01,
+            284.57
+          ]
+        }
+      }
+    },
+    "broom": {
+      "name": "魔法扫帚",
+      "size_factor": 0.735,
+      "frames": {
+        "0": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            0,
+            0,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            267
+          ],
+          "head": [
+            187,
+            137,
+            117
+          ],
+          "head_radius_x": 85
+        },
+        "1": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            362,
+            0,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            265
+          ]
+        },
+        "2": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            724,
+            0,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            267
+          ]
+        },
+        "3": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            1086,
+            0,
+            362,
+            362
+          ],
+          "anchor": [
+            181,
+            266
+          ]
+        },
+        "4": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            0,
+            362,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            259
+          ]
+        },
+        "5": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            362,
+            362,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            258
+          ]
+        },
+        "6": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            724,
+            362,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            259
+          ]
+        },
+        "7": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            1086,
+            362,
+            362,
+            362
+          ],
+          "anchor": [
+            181,
+            259
+          ]
+        },
+        "8": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            0,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            246
+          ]
+        },
+        "9": {
+          "sheet": "broom/core.webp",
+          "rect": [
+            362,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            246
+          ]
+        },
+        "10": {
+          "sheet": "broom/contact-v2.webp",
+          "rect": [
+            0,
+            0,
+            630,
+            623
+          ],
+          "anchor": [
+            322,
+            450
+          ],
+          "point": [
+            529,
+            353
+          ],
+          "scale": 0.968963
+        },
+        "11": {
+          "sheet": "broom/contact-v2.webp",
+          "rect": [
+            630,
+            0,
+            631,
+            623
+          ],
+          "anchor": [
+            322,
+            450
+          ],
+          "point": [
+            531,
+            382
+          ],
+          "scale": 0.970595
+        },
+        "12": {
+          "sheet": "broom/contact-v2.webp",
+          "rect": [
+            0,
+            623,
+            630,
+            624
+          ],
+          "anchor": [
+            322,
+            449
+          ],
+          "point": [
+            526,
+            402
+          ],
+          "scale": 0.970519
+        },
+        "13": {
+          "sheet": "broom/contact-v2.webp",
+          "rect": [
+            630,
+            623,
+            631,
+            624
+          ],
+          "anchor": [
+            322,
+            448
+          ],
+          "point": [
+            529,
+            337
+          ],
+          "scale": 0.970519
+        },
+        "14": {
+          "sheet": "broom/contact-v2.webp",
+          "rect": [
+            630,
+            0,
+            631,
+            623
+          ],
+          "anchor": [
+            322,
+            450
+          ],
+          "point": [
+            531,
+            382
+          ],
+          "scale": 0.970595
+        },
+        "16": {
+          "sheet": "broom/actions.webp",
+          "rect": [
+            0,
+            362,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            263
+          ]
+        },
+        "17": {
+          "sheet": "broom/actions.webp",
+          "rect": [
+            362,
+            362,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            262
+          ]
+        },
+        "18": {
+          "sheet": "broom/actions.webp",
+          "rect": [
+            724,
+            362,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            261
+          ]
+        },
+        "19": {
+          "sheet": "broom/actions.webp",
+          "rect": [
+            1086,
+            362,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            263
+          ]
+        },
+        "21": {
+          "sheet": "broom/actions.webp",
+          "rect": [
+            362,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            256
+          ]
+        },
+        "22": {
+          "sheet": "broom/actions.webp",
+          "rect": [
+            724,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            187,
+            255
+          ]
+        },
+        "23": {
+          "sheet": "broom/actions.webp",
+          "rect": [
+            1086,
+            724,
+            362,
+            362
+          ],
+          "anchor": [
+            184,
+            250
+          ]
+        }
+      }
+    }
+  }
+}

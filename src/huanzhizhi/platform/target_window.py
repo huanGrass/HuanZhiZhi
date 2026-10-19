@@ -5,8 +5,10 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass
 from huanzhizhi.platform.window_capture import WgcWindowCapture
+from huanzhizhi.task_sdk import _emit_click_point, _input_mode, _request_foreground_input
 
 
 WM_MOUSEMOVE = 0x0200
@@ -20,6 +22,14 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 MAX_CLIENT_COORDINATE = 0x7FFF
 DWMWA_EXTENDED_FRAME_BOUNDS = 9
+DWMWA_CLOAKED = 14
+INPUT_KEYS = {'ENTER': 0x0D, 'ESCAPE': 0x1B, 'TAB': 0x09, 'SPACE': 0x20,
+              'LEFT': 0x25, 'UP': 0x26, 'RIGHT': 0x27, 'DOWN': 0x28,
+              'HOME': 0x24, 'END': 0x23, 'PAGEUP': 0x21, 'PAGEDOWN': 0x22,
+              'BACKSPACE': 0x08, 'DELETE': 0x2E,
+              **{chr(code): code for code in range(65, 91)},
+              **{str(n): 0x30+n for n in range(10)},
+              **{'F'+str(n): 0x6F+n for n in range(1, 13)}}
 
 
 class DesktopWindowsError(RuntimeError):
@@ -120,6 +130,10 @@ class Win32DesktopApi:
                 raise DesktopWindowsError(f"enumerated hwnd no longer exists: {hwnd}")
             if not self._call(f"check visibility for window {hwnd}", "is_window_visible", hwnd):
                 continue
+            if self._call(f"check shell window {hwnd}", "is_shell_window", hwnd):
+                continue
+            if self._call(f"check cloaking for window {hwnd}", "is_window_cloaked", hwnd):
+                continue
             title = self._read_title(hwnd)
             if not title:
                 continue
@@ -133,9 +147,13 @@ class Win32DesktopApi:
             )
             client_width = client_rect[2] - client_rect[0]
             client_height = client_rect[3] - client_rect[1]
-            # Match the original selector: tiny or zero-client utility windows
-            # are not user-selectable targets and must not poison enumeration.
-            if client_width < 240 or client_height < 240:
+            if client_width <= 0 or client_height <= 0:
+                continue
+            # A minimized app may report only its icon-sized client rectangle.
+            # Keep it selectable while still excluding small utility windows.
+            if (client_width < 240 or client_height < 240) and not self._call(
+                f"check minimized state for window {hwnd}", "is_window_minimized", hwnd
+            ):
                 continue
             windows.append(self._read_window(hwnd, known_title=title))
         windows.sort(key=lambda item: (item.title.casefold(), item.hwnd))
@@ -181,12 +199,26 @@ class Win32DesktopApi:
             )
         return fresh
 
-    def capture_client(self, info: WindowInfo, *, region: tuple[int, int, int, int] | None = None):
+    def restore(self, info: WindowInfo) -> WindowInfo:
+        """Restore a selected minimized window and read its usable client size."""
+        _require_info(info)
+        fresh = self._read_window(info.hwnd, require_visible=True)
+        if self._call(f"check minimized state for window {info.hwnd}", "is_window_minimized", info.hwnd):
+            self._call(f"restore window {info.hwnd}", "show_window", info.hwnd, SW_RESTORE)
+            if self._call(f"verify restored window {info.hwnd}", "is_window_minimized", info.hwnd):
+                raise DesktopWindowsError(f"window is still minimized after restore: {info.hwnd}")
+            fresh = self._read_window(info.hwnd, require_visible=True)
+        return fresh
+
+    def capture_client(self, info: WindowInfo, *, region: tuple[int, int, int, int] | None = None,
+                       after: float | None = None):
         fresh = self._require_unchanged(info)
         if region is not None and (not isinstance(region, tuple) or len(region) != 4
                 or any(isinstance(v, bool) or not isinstance(v, int) for v in region)
                 or not (0 <= region[0] < region[2] <= fresh.width and 0 <= region[1] < region[3] <= fresh.height)):
             raise DesktopWindowsError('capture region must be inside the client rectangle')
+        if self._call(f"check minimized state for window {fresh.hwnd}", "is_window_minimized", fresh.hwnd):
+            raise WindowUnavailableError(f"target window is minimized: {fresh.hwnd}")
         capture_bounds = self._checked_rect(
             self._call(
                 f"read extended frame bounds for window {fresh.hwnd}",
@@ -202,6 +234,7 @@ class Win32DesktopApi:
                 crop_left=fresh.left - capture_bounds[0],
                 crop_top=fresh.top - capture_bounds[1],
                 **({'region': region} if region is not None else {}),
+                **({'after': after} if after is not None else {}),
             )
         except Exception as error:
             raise DesktopWindowsError(f"client capture failed for {fresh.label}: {error}") from error
@@ -210,29 +243,96 @@ class Win32DesktopApi:
             raise DesktopWindowsError("captured image conversion produced unexpected mode or size")
         return image
 
-    def post_left_click(self, info: WindowInfo, x: int, y: int) -> None:
+    def post_click(self, info: WindowInfo, x: int, y: int, action='click', *, wait=time.sleep) -> None:
+        """Click once through the shared pet-feedback path; coordinates are client pixels."""
         fresh = self._require_unchanged(info)
         x = _client_coordinate(x, "x", fresh.width)
         y = _client_coordinate(y, "y", fresh.height)
+        if action not in ('click', 'right_click', 'double_click'):
+            raise ValueError('Unsupported click action')
+        if _input_mode() == 'foreground':
+            _request_foreground_input(asdict(fresh), action, x, y)
+            return
         lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
-        messages = (
-            ("WM_MOUSEMOVE", WM_MOUSEMOVE, 0),
-            ("WM_LBUTTONDOWN", WM_LBUTTONDOWN, MK_LBUTTON),
-            ("WM_LBUTTONUP", WM_LBUTTONUP, 0),
-        )
-        for name, message, wparam in messages:
-            result = self._call(
-                f"post {name} to window {fresh.hwnd}",
-                "post_message",
-                fresh.hwnd,
-                message,
-                wparam,
-                lparam,
-            )
-            if result is not True:
-                raise DesktopWindowsError(
-                    f"post {name} to window {fresh.hwnd} returned {result!r}"
-                )
+        _emit_click_point(fresh.left + x, fresh.top + y)
+        down, up, flag = (0x204, 0x205, 2) if action == 'right_click' else (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON)
+        self._post_input(fresh, WM_MOUSEMOVE, 0, lparam)
+        try:
+            self._post_input(fresh, down, flag, lparam)
+        finally:
+            self._post_input(fresh, up, 0, lparam)
+        if action == 'double_click':
+            wait(.06)
+            self._require_unchanged(fresh)
+            try:
+                self._post_input(fresh, 0x203, MK_LBUTTON, lparam)
+            finally:
+                self._post_input(fresh, WM_LBUTTONUP, 0, lparam)
+
+    def _post_input(self, info, message, wparam, lparam):
+        result = self._call('post input', 'post_message', info.hwnd, message, wparam, lparam)
+        if result is not True:
+            raise DesktopWindowsError(f'PostMessage failed: {message:#x}')
+
+    def post_drag(self, info, x, y, end_x, end_y, duration=.5, *, wait=time.sleep):
+        fresh = self._require_unchanged(info)
+        x, y = _client_coordinate(x, 'x', fresh.width), _client_coordinate(y, 'y', fresh.height)
+        end_x = _client_coordinate(end_x, 'end_x', fresh.width)
+        end_y = _client_coordinate(end_y, 'end_y', fresh.height)
+        if type(duration) not in (int, float) or not .1 <= duration <= 5:
+            raise ValueError('Invalid drag duration')
+        if _input_mode() == 'foreground':
+            _request_foreground_input(asdict(fresh), 'drag', x, y, end_x, end_y, duration)
+            return
+        packed = (y << 16) | x
+        self._post_input(fresh, WM_MOUSEMOVE, 0, packed)
+        steps = max(2, round(duration/.02))
+        try:
+            self._post_input(fresh, WM_LBUTTONDOWN, MK_LBUTTON, packed)
+            for step in range(1, steps+1):
+                wait(duration/steps)
+                self._require_unchanged(fresh)
+                px, py = round(x+(end_x-x)*step/steps), round(y+(end_y-y)*step/steps)
+                packed = (py << 16) | px
+                self._post_input(fresh, WM_MOUSEMOVE, MK_LBUTTON, packed)
+        finally:
+            # Release even when wait raises on cancellation or the window moves.
+            self._post_input(fresh, WM_LBUTTONUP, 0, packed)
+
+    def post_scroll(self, info, x, y, delta):
+        fresh = self._require_unchanged(info)
+        x, y = _client_coordinate(x, 'x', fresh.width), _client_coordinate(y, 'y', fresh.height)
+        if type(delta) is not int or not delta or delta % 120 or abs(delta) > 1200:
+            raise ValueError('Invalid wheel delta')
+        # WM_MOUSEWHEEL uses screen coordinates, unlike mouse button messages.
+        sx, sy = fresh.left+x, fresh.top+y
+        if not -32768 <= sx <= 32767 or not -32768 <= sy <= 32767:
+            raise ValueError('Wheel position exceeds Win32 coordinate range')
+        self._post_input(fresh, 0x20A, (delta & 0xFFFF) << 16, ((sy & 0xFFFF) << 16) | (sx & 0xFFFF))
+
+    def post_key(self, info, key, *, wait=time.sleep):
+        fresh = self._require_unchanged(info)
+        if key not in INPUT_KEYS:
+            raise ValueError('Unsupported key')
+        code = INPUT_KEYS[key]
+        scan = ctypes.windll.user32.MapVirtualKeyW(code, 0)
+        extended = 1 << 24 if key in ('LEFT', 'RIGHT', 'UP', 'DOWN', 'HOME', 'END', 'PAGEUP', 'PAGEDOWN', 'DELETE') else 0
+        packed = 1 | (scan << 16) | extended
+        try:
+            self._post_input(fresh, 0x100, code, packed)
+            wait(.03)
+        finally:
+            self._post_input(fresh, 0x101, code, packed | (3 << 30))
+
+    def post_text(self, info, text, *, wait=time.sleep):
+        fresh = self._require_unchanged(info)
+        if not isinstance(text, str) or not 1 <= len(text) <= 1000 or any(ord(c) < 32 for c in text):
+            raise ValueError('Invalid input text')
+        encoded = text.encode('utf-16-le')
+        for index in range(0, len(encoded), 2):
+            wait(.005)
+            self._require_unchanged(fresh)
+            self._post_input(fresh, 0x102, int.from_bytes(encoded[index:index+2], 'little'), 1)
 
     def is_foreground(self, info: WindowInfo) -> bool:
         _require_info(info)
@@ -424,6 +524,10 @@ class _CtypesDesktopNative:
         user32.IsWindow.restype = ctypes.wintypes.BOOL
         user32.IsWindowVisible.argtypes = (ctypes.wintypes.HWND,)
         user32.IsWindowVisible.restype = ctypes.wintypes.BOOL
+        user32.IsIconic.argtypes = (ctypes.wintypes.HWND,)
+        user32.IsIconic.restype = ctypes.wintypes.BOOL
+        user32.GetShellWindow.argtypes = ()
+        user32.GetShellWindow.restype = ctypes.wintypes.HWND
         user32.GetWindowTextLengthW.argtypes = (ctypes.wintypes.HWND,)
         user32.GetWindowTextLengthW.restype = ctypes.c_int
         user32.GetWindowTextW.argtypes = (
@@ -520,6 +624,23 @@ class _CtypesDesktopNative:
 
     def is_window_visible(self, hwnd: int) -> bool:
         return bool(self._user32.IsWindowVisible(ctypes.wintypes.HWND(hwnd)))
+
+    def is_window_minimized(self, hwnd: int) -> bool:
+        return bool(self._user32.IsIconic(ctypes.wintypes.HWND(hwnd)))
+
+    def is_shell_window(self, hwnd: int) -> bool:
+        return hwnd == self._user32.GetShellWindow()
+
+    def is_window_cloaked(self, hwnd: int) -> bool:
+        # IsWindowVisible only checks WS_VISIBLE; DWM may still hide the window.
+        cloaked = ctypes.wintypes.DWORD()
+        result = self._dwmapi.DwmGetWindowAttribute(
+            ctypes.wintypes.HWND(hwnd), DWMWA_CLOAKED,
+            ctypes.byref(cloaked), ctypes.sizeof(cloaked),
+        )
+        if result != 0:
+            raise DesktopWindowsError(f"DwmGetWindowAttribute(CLOAKED) failed with HRESULT {result}")
+        return bool(cloaked.value)
 
     def get_window_title(self, hwnd: int) -> str:
         length = int(self._user32.GetWindowTextLengthW(ctypes.wintypes.HWND(hwnd)))

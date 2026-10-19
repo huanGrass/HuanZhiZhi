@@ -12,14 +12,6 @@
     "version": "12.3.0"
   },
   {
-    "package": "pywin32",
-    "version": "306"
-  },
-  {
-    "package": "PyInstaller",
-    "version": "6.20.0"
-  },
-  {
     "file": "Qt/LGPL-3.0.txt",
     "source": "https://raw.githubusercontent.com/qt/qtbase/v6.11.2/LICENSES/LGPL-3.0-only.txt"
   },
@@ -30,5 +22,25 @@
   {
     "file": "windows-capture/LICENCE",
     "source": "https://raw.githubusercontent.com/NiiightmareXD/windows-capture/main/windows-capture-python/LICENCE"
+  },
+  {
+    "package": "pip",
+    "version": "24.0"
+  },
+  {
+    "package": "setuptools",
+    "version": "65.5.0"
+  },
+  {
+    "package": "PySide6_Essentials",
+    "version": "6.11.2"
+  },
+  {
+    "package": "shiboken6",
+    "version": "6.11.2"
+  },
+  {
+    "package": "windows-capture",
+    "version": "2.0.1"
   }
 ]

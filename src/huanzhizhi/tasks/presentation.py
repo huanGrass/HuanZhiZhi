@@ -25,6 +25,7 @@ class TaskListItem:
     name: str
     description: str = ""
     presentation: str = "persistent"
+    group: str = "formal"
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -40,9 +41,15 @@ class TaskListItem:
 class TaskPresentationCoordinator(QtCore.QObject):
     start_task_requested = QtCore.Signal(str)
     stop_task_requested = QtCore.Signal()
+    pause_task_requested = QtCore.Signal()
     bubbles_changed = QtCore.Signal()
     status_changed = QtCore.Signal(str, str, str, bool)
     parameters_requested = QtCore.Signal(str)
+    runtime_parameters_requested = QtCore.Signal(dict)
+    runtime_transparency_changed = QtCore.Signal(bool, bool)
+    runtime_transparency_preference_changed = QtCore.Signal(bool)
+    edit_skill_requested = QtCore.Signal(str)
+    promote_task_requested = QtCore.Signal(str)
 
     def __init__(
         self,
@@ -50,6 +57,8 @@ class TaskPresentationCoordinator(QtCore.QObject):
         pet_rect_provider: Callable[[], QtCore.QRect],
         display_scale_provider: Callable[[], float],
         speech_rect_provider: Callable[[], QtCore.QRect | None],
+        task_menu_rect_provider: Callable[[], QtCore.QRect] | None = None,
+        runtime_rect_provider: Callable[[], QtCore.QRect] | None = None,
         parent: QtCore.QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -61,7 +70,13 @@ class TaskPresentationCoordinator(QtCore.QObject):
         for name, provider in providers.items():
             if not callable(provider):
                 raise TypeError(f"{name} 必须可调用")
+        if task_menu_rect_provider is not None and not callable(task_menu_rect_provider):
+            raise TypeError("task_menu_rect_provider 必须可调用")
+        if runtime_rect_provider is not None and not callable(runtime_rect_provider):
+            raise TypeError('runtime_rect_provider 必须可调用')
         self._pet_rect_provider = pet_rect_provider
+        self._task_menu_rect_provider = task_menu_rect_provider
+        self._runtime_rect_provider = runtime_rect_provider
         self._display_scale_provider = display_scale_provider
         self._speech_rect_provider = speech_rect_provider
 
@@ -71,6 +86,7 @@ class TaskPresentationCoordinator(QtCore.QObject):
         self._mode = ""
         self._selected_id = ""
         self._running = False
+        self._pause_state = 'unavailable'
         self._status_title = "未开始"
         self._task_name = ""
         self._detail = "等待启动"
@@ -79,9 +95,14 @@ class TaskPresentationCoordinator(QtCore.QObject):
         self._display_scale_override: float | None = None
         self._result_pending = False
         self._pet_visible = True
+        self._chat_open = False
         self._strip = StatusStrip()
         self._strip.details_requested.connect(self.handle_pet_clicked)
         self._strip.stop_requested.connect(self.stop_task_requested)
+        self._strip.pause_requested.connect(self.pause_task_requested)
+        self._strip.parameters_changed.connect(self.runtime_parameters_requested)
+        self._strip.transparency.toggled.connect(self._sync_strip)
+        self._strip.transparency.toggled.connect(self.runtime_transparency_preference_changed)
 
         self._auto_hide_timer = QtCore.QTimer(self)
         self._auto_hide_timer.setSingleShot(True)
@@ -114,7 +135,7 @@ class TaskPresentationCoordinator(QtCore.QObject):
         self._ensure_open()
         if not isinstance(global_point, QtCore.QPoint):
             raise TypeError("全局点击位置必须是 QPoint")
-        return (self._strip.isVisible() and self._strip.geometry().contains(global_point)) or any(
+        return self._strip.runtime_contains(global_point) or (self._strip.isVisible() and self._strip.geometry().contains(global_point)) or any(
             bubble.isVisible() and bubble.geometry().contains(global_point)
             for bubble in self._bubbles
         )
@@ -179,6 +200,11 @@ class TaskPresentationCoordinator(QtCore.QObject):
         started = running and not self._running
         finished = not running and self._running
         self._running = running
+        if not running or status_title == '停止中':
+            self._strip.set_runtime_enabled(False)
+            self._pause_state = 'unavailable'
+        if not running:
+            self._strip.set_runtime_parameters((), {})
         if started:
             self._result_hide_timer.stop()
             self._result_pending = False
@@ -206,6 +232,8 @@ class TaskPresentationCoordinator(QtCore.QObject):
 
     def handle_pet_clicked(self) -> None:
         self._ensure_open()
+        if self._chat_open:
+            return
         if self._running or self._result_pending:
             if self._mode == "status" and self._bubbles:
                 self._clear_bubbles()
@@ -215,8 +243,36 @@ class TaskPresentationCoordinator(QtCore.QObject):
                     self._sync_strip()
             else:
                 self._show_status_bubble()
+        elif self._bubbles:
+            self._clear_bubbles()
         else:
             self._show_task_list()
+
+    def set_chat_open(self, opened: bool) -> None:
+        self._ensure_open()
+        self._chat_open = opened
+        if opened:
+            self.close_bubbles()
+            if self._strip.runtime_popup is not None:
+                self._strip.runtime_popup.hide()
+
+    def set_runtime_parameters(self, parameters, values) -> None:
+        self._strip.set_runtime_parameters(parameters, values)
+        self.reposition()
+
+    def set_runtime_enabled(self, enabled: bool) -> None:
+        self._strip.set_runtime_enabled(enabled)
+
+    def set_runtime_transparent(self, transparent: bool) -> None:
+        self._strip.transparency.setChecked(transparent)
+
+    def runtime_update_pending(self) -> None:
+        if self._strip.runtime_popup is not None:
+            self._strip.runtime_popup.set_pending()
+
+    def runtime_update_finished(self, values: dict) -> None:
+        if self._strip.runtime_popup is not None:
+            self._strip.runtime_popup.set_result(values)
 
     def set_pet_visible(self, visible: bool) -> None:
         self._pet_visible = visible
@@ -227,16 +283,29 @@ class TaskPresentationCoordinator(QtCore.QObject):
             self.reposition()
 
     def _sync_strip(self) -> None:
+        self._strip.transparency.setEnabled(self._running)
+        self.runtime_transparency_changed.emit(self._running, self._strip.transparency.isChecked())
         active = self._running or self._result_pending
         if active:
             quiet = self._running and self._status_title != "停止中" and not self._task_preferences.get(self._selected_id, {}).get("show_logs", True)
-            self._strip.set_status(self._resolved_task_name(), "运行中" if quiet else self._status_title,
+            status = {'pausing': '暂停中', 'paused': '已暂停', 'resuming': '继续中'}.get(
+                self._pause_state, "运行中" if quiet else self._status_title)
+            self._strip.set_status(self._resolved_task_name(), status,
                                    self._running and self._status_title != "停止中")
+        self._strip.set_pause_state(self._pause_state)
         self._strip.setVisible(active and self._pet_visible)
+
+    def set_pause_state(self, state: str) -> None:
+        self._pause_state = state
+        self._sync_strip()
+        if self._mode == 'status' and self._bubbles:
+            self._set_status_content(self._bubbles[0])
 
     def reposition(self) -> None:
         self._ensure_open()
-        pet_rect = self._provided_pet_rect()
+        pet_rect = self._runtime_rect_provider() if self._runtime_rect_provider else self._provided_pet_rect()
+        if not isinstance(pet_rect, QtCore.QRect) or not pet_rect.isValid():
+            raise ValueError('runtime_rect_provider 必须返回有效的 QRect')
         screen = QtGui.QGuiApplication.screenAt(pet_rect.center()) or QtGui.QGuiApplication.primaryScreen()
         if screen is not None:
             area = screen.availableGeometry()
@@ -253,6 +322,12 @@ class TaskPresentationCoordinator(QtCore.QObject):
             bubble.set_display_scale(display_scale)
 
         if self._mode == "list" and self._tasks:
+            if self._task_menu_rect_provider is not None:
+                menu_rect = self._task_menu_rect_provider()
+                if not isinstance(menu_rect, QtCore.QRect) or not menu_rect.isValid():
+                    raise ValueError("task_menu_rect_provider 必须返回有效的 QRect")
+                if screen is not None and screen.geometry().contains(menu_rect.center()):
+                    pet_rect = menu_rect
             BubbleLayoutManager.position_task_side_columns(
                 self._bubbles,
                 pet_rect,
@@ -300,6 +375,7 @@ class TaskPresentationCoordinator(QtCore.QObject):
     def close(self) -> None:
         if self._closed:
             return
+        self.runtime_transparency_changed.emit(False, self._strip.transparency.isChecked())
         self._clear_bubbles()
         self._result_hide_timer.stop()
         self._strip.close()
@@ -325,6 +401,7 @@ class TaskPresentationCoordinator(QtCore.QObject):
                     click_key=f"select:{item.id}",
                     layout_mode="compact",
                     accent_index=index,
+                    is_test=item.group == 'test',
                 )
                 self._bubbles.append(bubble)
         self.reposition()
@@ -338,13 +415,19 @@ class TaskPresentationCoordinator(QtCore.QObject):
         self._clear_bubbles(reset_mode=False)
         self._mode = "check"
         bubble = self._new_bubble()
+        buttons = [
+            {"key": "start_task", "label": "开始执行", "kind": "primary"},
+            {"key": "parameters", "label": "参数设置", "kind": "quiet"},
+            {"key": "edit_skill", "label": "修改技能", "kind": "quiet"},
+        ]
+        if item.group == 'test':
+            buttons.append({"key": "promote_task", "label": "加入正式", "kind": "secondary"})
         bubble.set_content(
             item.name,
             item.description or "这个任务没有提供说明。",
-            [
-                {"key": "start_task", "label": "开始执行", "kind": "primary"},
-                {"key": "parameters", "label": "参数设置"},
-            ],
+            buttons,
+            layout_mode="actions",
+            is_test=item.group == 'test',
         )
         self._bubbles.append(bubble)
         self.reposition()
@@ -375,7 +458,8 @@ class TaskPresentationCoordinator(QtCore.QObject):
         show_logs = self._task_preferences.get(self._selected_id, {}).get("show_logs", True)
         quiet = self._running and self._status_title != "停止中" and not show_logs
         bubble.set_content(
-            "运行中" if quiet else self._status_title,
+            {'pausing': '暂停中', 'paused': '已暂停', 'resuming': '继续中'}.get(
+                self._pause_state, "运行中" if quiet else self._status_title),
             "" if quiet else f"{task_name}\n{self._detail}",
             buttons,
         )
@@ -390,6 +474,12 @@ class TaskPresentationCoordinator(QtCore.QObject):
             self._show_check_bubble(key.split(":", 1)[1])
         elif key == "parameters":
             self.parameters_requested.emit(self._selected_id)
+        elif key == "edit_skill":
+            if self._selected_id and not self._running:
+                self.edit_skill_requested.emit(self._selected_id)
+        elif key == "promote_task":
+            if self._selected_id and not self._running:
+                self.promote_task_requested.emit(self._selected_id)
         elif key == "close_details":
             self.handle_pet_clicked()
         elif key == "start_task":

@@ -1,0 +1,192 @@
+[
+  {
+    "id": "katago",
+    "name": "KataGo（CUDA 版）",
+    "purpose": "围棋落子策略、局面分析与形势判断",
+    "source": "https://github.com/lightvector/KataGo/releases/tag/v1.18.2",
+    "protocol": "https://github.com/lightvector/KataGo/blob/v1.18.2/docs/Analysis_Engine.md",
+    "engine": "katago/v1.18.2-cuda12.8-cudnn9.8.0-windows-x64/katago.exe",
+    "model": "katago/models/kata1-tf3-b11c768-s11003M-d5973M-7gres.bin.gz",
+    "cudnn": "cudnn/9.10.2.21-cuda12/bin",
+    "requirements": [
+      {
+        "id": "engine",
+        "name": "引擎",
+        "detail": "KataGo 1.18.2 · CUDA 版",
+        "source": "https://github.com/lightvector/KataGo/releases/tag/v1.18.2"
+      },
+      {
+        "id": "model",
+        "name": "分析模型",
+        "detail": "KataGo b11c768 模型",
+        "source": "https://katagotraining.org/networks/"
+      },
+      {
+        "id": "gpu",
+        "name": "NVIDIA GPU / 驱动",
+        "detail": "支持 CUDA 12.8",
+        "source": "https://www.nvidia.com/Download/index.aspx"
+      },
+      {
+        "id": "cuda",
+        "name": "CUDA 运行库",
+        "detail": "CUDA 12.8",
+        "source": "https://developer.nvidia.com/cuda-12-8-0-download-archive"
+      },
+      {
+        "id": "cudnn",
+        "name": "cuDNN 运行库",
+        "detail": "cuDNN 9.10.2 · CUDA 12 版",
+        "source": "https://developer.nvidia.com/cudnn-archive"
+      },
+      {
+        "id": "msvc",
+        "name": "Visual C++ 运行库",
+        "detail": "x64 运行库",
+        "source": "https://github.com/lightvector/KataGo/releases/tag/v1.18.2"
+      },
+      {
+        "id": "analysis",
+        "name": "实际分析验证",
+        "detail": "19×19 棋盘分析",
+        "source": "https://github.com/lightvector/KataGo/blob/v1.18.2/docs/Analysis_Engine.md"
+      }
+    ],
+    "cuda": "cuda/12.8/bin",
+    "downloads": [
+      {
+        "id": "engine",
+        "name": "KataGo 引擎及配套运行库",
+        "checks": [
+          "engine",
+          "msvc"
+        ],
+        "url": "https://github.com/lightvector/KataGo/releases/download/v1.18.2/katago-v1.18.2-cuda12.8-cudnn9.8.0-windows-x64.zip",
+        "sha256": "69a94227afaaf268634134805b9469f9f482760ee6c986d315d89525de0eefa2",
+        "size": 10173580,
+        "destination": "katago/v1.18.2-cuda12.8-cudnn9.8.0-windows-x64",
+        "archive_prefix": "",
+        "runtime_only": false,
+        "license_url": "https://raw.githubusercontent.com/lightvector/KataGo/v1.18.2/LICENSE"
+      },
+      {
+        "id": "model",
+        "name": "KataGo 分析模型",
+        "checks": [
+          "model"
+        ],
+        "url": "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-tf3-b11c768-s11003M-d5973M-7gres.bin.gz",
+        "sha256": "93bdb63a3bfae4a70db0cb5265287495ecfc10b1ba1cc6814feeba1cdf055871",
+        "size": 262039869,
+        "destination": "katago/models/kata1-tf3-b11c768-s11003M-d5973M-7gres.bin.gz",
+        "license_url": "https://katagotraining.org/network_license/"
+      },
+      {
+        "id": "cudnn",
+        "name": "cuDNN 9.10.2",
+        "checks": [
+          "cudnn"
+        ],
+        "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.10.2.21_cuda12-archive.zip",
+        "sha256": "c1a4567d822ebda7373fa1f19255dff4942302de741f830160b6c7d1fb31af23",
+        "size": 683336095,
+        "destination": "cudnn/9.10.2.21-cuda12",
+        "archive_prefix": "cudnn-windows-x86_64-9.10.2.21_cuda12-archive/",
+        "runtime_only": true
+      },
+      {
+        "id": "cuda_cudart",
+        "name": "CUDA 12.8 运行库",
+        "checks": [
+          "cuda"
+        ],
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.8.57-archive.zip",
+        "sha256": "2c7aa62a195d79229d4381c8bd0174a30502cf3d8124c6e94ee50a7fc8a1e9f4",
+        "size": 3034859,
+        "destination": "cuda/12.8",
+        "archive_prefix": "cuda_cudart-windows-x86_64-12.8.57-archive/",
+        "runtime_only": true
+      },
+      {
+        "id": "libcublas",
+        "name": "CUDA cuBLAS",
+        "checks": [
+          "cuda"
+        ],
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.8.3.14-archive.zip",
+        "sha256": "a2f990cf61f0086d942632f2455727240baa9378c2e9fa2bdda56ef81f6cf8ad",
+        "size": 574528660,
+        "destination": "cuda/12.8",
+        "archive_prefix": "libcublas-windows-x86_64-12.8.3.14-archive/",
+        "runtime_only": true
+      },
+      {
+        "id": "cuda_nvrtc",
+        "name": "CUDA NVRTC",
+        "checks": [
+          "cuda"
+        ],
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.8.61-archive.zip",
+        "sha256": "e43603b09f8a52d681ceb814c00b655af19da53692ab91671dabbf8071c8f93d",
+        "size": 305553480,
+        "destination": "cuda/12.8",
+        "archive_prefix": "cuda_nvrtc-windows-x86_64-12.8.61-archive/",
+        "runtime_only": true
+      }
+    ]
+  },
+  {
+    "id": "pikafish",
+    "name": "皮卡鱼 Pikafish（CPU 版）",
+    "version": "2026-09-06",
+    "purpose": "中国象棋走法搜索与局面分析；Windows x64 CPU，无需 CUDA",
+    "source": "https://github.com/official-pikafish/Pikafish/releases/tag/Pikafish-2026-09-06",
+    "protocol": "https://github.com/official-pikafish/Pikafish/wiki/UCI-%26-Commands",
+    "engine": "pikafish/2026-09-06-windows-x64/Pikafish-Windows-x86-64-universal.exe",
+    "model": "pikafish/2026-09-06-windows-x64/pikafish.nnue",
+    "model_sha256": "7d13d73569a9b571ba0eb20cf1596247bc2a42738967e61afef6482b231e900e",
+    "requirements": [
+      {
+        "id": "engine",
+        "name": "引擎",
+        "detail": "Pikafish 2026-09-06 · Windows x64 通用 CPU 版",
+        "source": "https://github.com/official-pikafish/Pikafish/releases/tag/Pikafish-2026-09-06"
+      },
+      {
+        "id": "model",
+        "name": "NNUE 模型",
+        "detail": "官方发布包配套 pikafish.nnue · SHA-256 校验",
+        "source": "https://github.com/official-pikafish/Pikafish/releases/tag/Pikafish-2026-09-06"
+      },
+      {
+        "id": "analysis",
+        "name": "实际分析验证",
+        "detail": "UCI 握手、加载 NNUE 并搜索象棋开局（深度 4）",
+        "source": "https://github.com/official-pikafish/Pikafish/wiki/UCI-%26-Commands"
+      }
+    ],
+    "downloads": [
+      {
+        "id": "engine",
+        "name": "皮卡鱼引擎与 NNUE 模型",
+        "checks": [
+          "engine",
+          "model"
+        ],
+        "url": "https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-09-06/Pikafish.2026-09-06.7z",
+        "sha256": "41952bbfe2520faceb5902c69e6ab4845cc999841d2b49a95cc1be7867a25e5b",
+        "size": 53603424,
+        "destination": "pikafish/2026-09-06-windows-x64",
+        "archive_format": "7z",
+        "archive_files": [
+          "Pikafish-Windows-x86-64-universal.exe",
+          "pikafish.nnue",
+          "Copying.txt",
+          "NNUE-License.md",
+          "README.md",
+          "AUTHORS"
+        ]
+      }
+    ]
+  }
+]

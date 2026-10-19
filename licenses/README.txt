@@ -9,7 +9,7 @@ Qt / PySide6 / Shiboken 6.11.2
 Copyright (C) The Qt Company Ltd. and other contributors.
 This distribution uses the LGPLv3 option for the included Qt libraries and Python
 bindings. LGPL-3.0.txt and GPL-3.0.txt are included in Qt/.
-Qt third-party attribution texts for Core, GUI, Network, Widgets, OpenGL, SVG and
+Qt third-party attribution texts for Core, GUI, Network, Widgets, PrintSupport, Test, OpenGL, SVG and
 image formats are included in Qt/; some upstream notices describe features not
 used by this application.
 
@@ -31,8 +31,24 @@ NumPy 1.23.5 (including OpenBLAS notices): https://github.com/numpy/numpy/tree/v
 OpenCV Python 4.9.0.80 (including FFmpeg notices): https://github.com/opencv/opencv-python/tree/4.9.0.80
 Pillow 12.3.0: https://github.com/python-pillow/Pillow
 windows-capture 2.0.1: https://github.com/NiiightmareXD/windows-capture
-pywin32 306: https://github.com/mhammond/pywin32/tree/b306
-PyInstaller 6.20.0 bootloader: https://github.com/pyinstaller/pyinstaller/tree/v6.20.0
+pip 24.0: https://github.com/pypa/pip/tree/24.0
+setuptools 65.5.0: https://github.com/pypa/setuptools/tree/v65.5.0
+
+The portable build excludes unused FFmpeg video plugins and the optional Mesa
+software OpenGL renderer. OpenCV's original wheel notices are retained unchanged.
+pip and setuptools vendor notices are retained under python/Lib/site-packages/
+pip/_vendor and setuptools/_vendor (including their dist-info metadata).
+Lucide / Feather icon notices are in src/huanzhizhi/assets/dock/LICENSE.txt.
+Image provenance is documented in ASSETS.md.
+
+Corresponding Qt and PySide/Shiboken source archives accompany the release as
+HuanZhiZhi-0.2.0-third-party-sources.zip. Exact upstream URLs and SHA-256 values
+are in source-archives.json. Distribute this source attachment alongside the
+portable ZIP from the same release page. The sources include upstream build
+scripts; the distributed library binaries are unmodified. To replace libraries,
+exit the application, back up python/Lib/site-packages/PySide6 and shiboken6,
+replace with compatible Windows x64 builds, then restart using the launcher.
+The application does not enforce runtime file hashes or library signatures.
 
 Each component's copied license and copyright texts are in its subdirectory.
 Python's notices also cover bundled support components. Microsoft runtime DLLs

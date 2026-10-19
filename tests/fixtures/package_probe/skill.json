@@ -1,0 +1,7 @@
+{
+  "protocol_version": 1,
+  "id": "package_probe",
+  "name": "Package probe v1",
+  "description": "Safe single-task build verification",
+  "presentation": "persistent"
+}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from huanzhizhi.pet.bubble_layout import BubbleLayoutManager, bubble_scale_for_display
@@ -14,7 +16,9 @@ _DEFAULT_DURATION_MS = 3200
 
 
 class SpeechBubbleWindow(QtWidgets.QWidget):
-    """A non-interactive speech bubble positioned around the desktop pet."""
+    """A speech bubble with optional skill-repair actions around the desktop pet."""
+
+    visibility_changed = QtCore.Signal(bool)
 
     def __init__(self, display_scale: float = 0.32) -> None:
         flags = (
@@ -39,6 +43,17 @@ class SpeechBubbleWindow(QtWidgets.QWidget):
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.addWidget(self.label)
+        self._on_repair: Callable[[], None] | None = None
+        self.repair_button = QtWidgets.QPushButton('让 AI 检查并修复', self)
+        self.dismiss_button = QtWidgets.QPushButton('暂不处理', self)
+        self.repair_button.clicked.connect(self._repair)
+        self.dismiss_button.clicked.connect(self.hide_bubble)
+        self._actions = QtWidgets.QHBoxLayout()
+        for button in (self.repair_button, self.dismiss_button):
+            button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            button.hide()
+            self._actions.addWidget(button)
+        self._layout.addLayout(self._actions)
         self._apply_scaled_style()
 
         self.hide_timer = QtCore.QTimer(self)
@@ -50,16 +65,26 @@ class SpeechBubbleWindow(QtWidgets.QWidget):
         text: str,
         duration_ms: int = _DEFAULT_DURATION_MS,
         pet_rect: QtCore.QRect | None = None,
+        *,
+        on_repair: Callable[[], None] | None = None,
+        action_text: str = '让 AI 检查并修复',
     ) -> None:
-        """Display non-empty text and hide it automatically after the duration."""
+        """Display text; repair choices stay visible until acted on or replaced."""
         if not isinstance(text, str) or not text.strip():
             raise ValueError("气泡文本不能为空")
         if isinstance(duration_ms, bool) or not isinstance(duration_ms, int):
             raise TypeError("显示时长必须是整数毫秒")
         if duration_ms <= 0:
             raise ValueError("显示时长必须大于零")
+        if on_repair is not None and not callable(on_repair):
+            raise TypeError("修复操作必须可调用")
 
         self.hide_timer.stop()
+        self._on_repair = on_repair
+        self.repair_button.setText(action_text)
+        for button in (self.repair_button, self.dismiss_button):
+            button.setVisible(on_repair is not None)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, on_repair is None)
         self.label.setText(text)
         self._fit_label_width(text)
         self.label.adjustSize()
@@ -67,13 +92,29 @@ class SpeechBubbleWindow(QtWidgets.QWidget):
         if pet_rect is not None:
             self.position_around(pet_rect)
         self.show()
-        self._window_policy.set_input_passthrough(True, layered=True)
+        self._window_policy.set_input_passthrough(on_repair is None, layered=True)
         self.raise_()
-        self.hide_timer.start(max(_MIN_DURATION_MS, duration_ms))
+        if on_repair is None:
+            self.hide_timer.start(max(_MIN_DURATION_MS, duration_ms))
+
+    def _repair(self) -> None:
+        callback = self._on_repair
+        self.hide_bubble()
+        if callback is not None:
+            callback()
 
     def hide_bubble(self) -> None:
         self.hide_timer.stop()
+        self._on_repair = None
         self.hide()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        self.visibility_changed.emit(True)
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        super().hideEvent(event)
+        self.visibility_changed.emit(False)
 
     def position_around(self, pet_rect: QtCore.QRect) -> None:
         """Place the bubble near the pet without crossing the target screen."""
@@ -124,6 +165,16 @@ class SpeechBubbleWindow(QtWidgets.QWidget):
         return max(1, round(value * self._bubble_scale))
 
     def _apply_scaled_style(self) -> None:
+        self._actions.setSpacing(self._scaled_int(8))
+        for button in (self.repair_button, self.dismiss_button):
+            button.setStyleSheet(f'''
+                QPushButton {{ color: #2f2a24; background: #f3ece0;
+                    border: 1px solid #d6c8b5; border-radius: {self._scaled_int(6)}px;
+                    padding: {self._scaled_int(6)}px {self._scaled_int(8)}px;
+                    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI";
+                    font-size: {self._scaled_int(13)}px; }}
+                QPushButton:hover {{ background: #e9dfce; }}
+            ''')
         self.label.setMinimumWidth(1)
         self.label.setMaximumWidth(self._scaled_int(_MAX_TEXT_WIDTH))
         self.label.setStyleSheet(

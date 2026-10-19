@@ -1,0 +1,141 @@
+{
+  "cli_version": "0.162.0-alpha.17.2",
+  "source": "Captured from installed codex exec --json using an isolated CODEX_HOME and a loopback HTTP fixture; no model requests.",
+  "cases": {
+    "quota": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "Quota exceeded. Check your plan and billing details."
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "Quota exceeded. Check your plan and billing details."
+          }
+        }
+      ]
+    },
+    "usage_limit": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "You’ve hit your usage limit. Try again later."
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "You’ve hit your usage limit. Try again later."
+          }
+        }
+      ]
+    },
+    "rate_limit": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "exceeded retry limit, last status: 429 Too Many Requests"
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "exceeded retry limit, last status: 429 Too Many Requests"
+          }
+        }
+      ]
+    },
+    "forbidden": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "unexpected status 403 Forbidden: Permission denied, url: http://127.0.0.1:9000/v1/responses"
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "unexpected status 403 Forbidden: Permission denied, url: http://127.0.0.1:9000/v1/responses"
+          }
+        }
+      ]
+    },
+    "context": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "{\"error\": {\"code\": \"context_length_exceeded\", \"type\": \"invalid_request_error\", \"message\": \"Input too large\"}}"
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "{\"error\": {\"code\": \"context_length_exceeded\", \"type\": \"invalid_request_error\", \"message\": \"Input too large\"}}"
+          }
+        }
+      ]
+    },
+    "model": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "unexpected status 404 Not Found: The requested model does not exist or you do not have access to it., url: http://127.0.0.1:9000/v1/responses"
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "unexpected status 404 Not Found: The requested model does not exist or you do not have access to it., url: http://127.0.0.1:9000/v1/responses"
+          }
+        }
+      ]
+    },
+    "server": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "unexpected status 503 Service Unavailable: Service unavailable, url: http://127.0.0.1:9000/v1/responses"
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "unexpected status 503 Service Unavailable: Service unavailable, url: http://127.0.0.1:9000/v1/responses"
+          }
+        }
+      ]
+    },
+    "stream_disconnect": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "stream disconnected before completion: stream closed before response.completed"
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "stream disconnected before completion: stream closed before response.completed"
+          }
+        }
+      ]
+    },
+    "unauthorized": {
+      "exit_code": 1,
+      "events": [
+        {
+          "type": "error",
+          "message": "unexpected status 401 Unauthorized: Incorrect API key provided: test-key, url: http://127.0.0.1:9000/v1/responses"
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "unexpected status 401 Unauthorized: Incorrect API key provided: test-key, url: http://127.0.0.1:9000/v1/responses"
+          }
+        }
+      ]
+    }
+  }
+}

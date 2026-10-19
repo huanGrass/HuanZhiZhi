@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
@@ -29,6 +30,19 @@ class LogEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ParametersAppliedEvent:
+    request_id: int
+    values: dict[str, int | str]
+    type: str = field(default="parameters_applied", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PauseStateEvent:
+    paused: bool
+    type: str = field(default="pause_state", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class SpeakEvent:
     text: str
     audio_path: str | None
@@ -41,6 +55,25 @@ class PointEvent:
     x: int
     y: int
     type: str = field(default="point", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class InputRequestEvent:
+    request_id: str
+    kind: str
+    window: dict[str, int | str]
+    x: int
+    y: int
+    end_x: int | None
+    end_y: int | None
+    duration: float
+    type: str = field(default="input_request", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class InputCancelEvent:
+    request_id: str
+    type: str = field(default="input_cancel", init=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +104,43 @@ class FinishedEvent:
     type: str = field(default="finished", init=False)
 
 
-TaskEvent: TypeAlias = StatusEvent | LogEvent | SpeakEvent | PointEvent | HintEvent | PreviewEvent | FinishedEvent
+@dataclass(frozen=True, slots=True)
+class PetAcquireEvent:
+    lease: str
+    type: str = field(default='pet_acquire', init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PetUpdateEvent:
+    lease: str
+    x: float
+    y: float
+    facing: str
+    pose: str
+    type: str = field(default='pet_update', init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PetReleaseEvent:
+    lease: str
+    type: str = field(default='pet_release', init=False)
+
+
+TaskEvent: TypeAlias = StatusEvent | LogEvent | ParametersAppliedEvent | PauseStateEvent | SpeakEvent | PointEvent | InputRequestEvent | InputCancelEvent | HintEvent | PreviewEvent | FinishedEvent | PetAcquireEvent | PetUpdateEvent | PetReleaseEvent
+
+
+def validate_pet_state(x, y, facing, pose) -> None:
+    if any(type(v) not in (int, float) or not math.isfinite(v) or abs(v) > 1_000_000 for v in (x, y)):
+        raise ProtocolError('桌宠坐标必须是有效的 Qt 全局逻辑坐标')
+    if not isinstance(facing, str) or facing not in {'left', 'right'}:
+        raise ProtocolError('桌宠朝向必须是 left 或 right')
+    if not isinstance(pose, str) or pose not in {'idle', 'move', 'reach'}:
+        raise ProtocolError('桌宠姿态必须是 idle、move 或 reach')
+
+
+def encode_pet_result(lease: str, geometry: dict | None, error: str | None = None) -> bytes:
+    return _encode_message(dict(protocol_version=PROTOCOL_VERSION, type='pet_result',
+                                lease=_input_request_id(lease), geometry=geometry, error=error))
 
 
 def encode_start_message(task_id: str, options: dict[str, object]) -> bytes:
@@ -91,6 +160,75 @@ def encode_stop_message() -> bytes:
 
 def encode_step_message() -> bytes:
     return _encode_message({"protocol_version": PROTOCOL_VERSION, "type": "step"})
+
+
+def encode_pause_message(paused: bool) -> bytes:
+    if type(paused) is not bool:
+        raise TypeError('暂停状态必须是布尔值')
+    return _encode_message({'protocol_version': PROTOCOL_VERSION, 'type': 'pause' if paused else 'resume'})
+
+
+def encode_parameter_update(request_id: int, values: dict) -> bytes:
+    if type(request_id) is not int or request_id <= 0:
+        raise ValueError("参数更新 request_id 必须是正整数")
+    return _encode_message({"protocol_version": PROTOCOL_VERSION, "type": "update_parameters",
+                            "request_id": request_id, "values": _parameter_values(values)})
+
+
+def encode_input_result(request_id: str, error: str | None = None) -> bytes:
+    request_id = _input_request_id(request_id)
+    if error is not None and not isinstance(error, str):
+        raise ProtocolError('input_result.error 必须是字符串或 null')
+    return _encode_message(dict(protocol_version=PROTOCOL_VERSION, type='input_result',
+                                request_id=request_id, error=error))
+
+
+def _input_request_id(value: object) -> str:
+    if (not isinstance(value, str) or len(value) != 32
+            or any(character not in '0123456789abcdef' for character in value)):
+        raise ProtocolError('input request_id 必须是 32 位小写十六进制字符串')
+    return value
+
+
+def _parse_input_request(payload: dict) -> InputRequestEvent:
+    _require_exact_fields(payload, {'protocol_version', 'type', 'request_id', 'kind',
+                                    'window', 'x', 'y', 'end_x', 'end_y', 'duration'})
+    request_id = _input_request_id(payload['request_id'])
+    kind, window = payload['kind'], payload['window']
+    if not isinstance(kind, str) or kind not in {'click', 'right_click', 'double_click', 'drag'}:
+        raise ProtocolError('input_request.kind 无效')
+    if not isinstance(window, dict) or set(window) != {'hwnd', 'title', 'left', 'top', 'width', 'height'}:
+        raise ProtocolError('input_request.window 必须包含完整的窗口身份和客户区位置')
+    for field_name in ('hwnd', 'left', 'top', 'width', 'height'):
+        if type(window[field_name]) is not int:
+            raise ProtocolError(f'input_request.window.{field_name} 必须是整数')
+    if any(window[name] <= 0 for name in ('hwnd', 'width', 'height')):
+        raise ProtocolError('input_request 窗口句柄和大小必须是正整数')
+    if not isinstance(window['title'], str) or not window['title'].strip():
+        raise ProtocolError('input_request.window.title 必须是非空字符串')
+    x, y = _required_integer(payload, 'x'), _required_integer(payload, 'y')
+    if not (0 <= x < window['width'] and 0 <= y < window['height']
+            and x <= 0x7fff and y <= 0x7fff):
+        raise ProtocolError('input_request 点击坐标超出客户区或 Win32 范围')
+    end_x, end_y, duration = payload['end_x'], payload['end_y'], payload['duration']
+    if type(duration) not in (int, float) or (type(duration) is float and not math.isfinite(duration)):
+        raise ProtocolError('input_request.duration 必须是有限秒数')
+    if kind == 'drag':
+        end_x, end_y = _required_integer(payload, 'end_x'), _required_integer(payload, 'end_y')
+        if not (0 <= end_x < window['width'] and 0 <= end_y < window['height']
+                and end_x <= 0x7fff and end_y <= 0x7fff and .1 <= duration <= 5):
+            raise ProtocolError('input_request 拖动终点或时长无效')
+    elif end_x is not None or end_y is not None or duration != 0:
+        raise ProtocolError('非拖动输入的 end_x/end_y 必须为 null，duration 必须为零')
+    return InputRequestEvent(request_id, kind, dict(window), x, y, end_x, end_y, float(duration))
+
+
+def _parameter_values(values: object) -> dict[str, int | str]:
+    if (not isinstance(values, dict) or not values
+            or any(not isinstance(key, str) or not key or type(value) not in (int, str)
+                   for key, value in values.items())):
+        raise ProtocolError("参数更新 values 必须是非空的整数或字符串参数对象")
+    return dict(values)
 
 
 def validate_options(options: dict[object, object]) -> dict[str, object]:
@@ -124,6 +262,23 @@ def parse_event_line(line: bytes | str) -> TaskEvent:
         raise ProtocolError("任务事件必须是单个 JSON 对象")
     _require_protocol_header(payload)
     event_type = payload["type"]
+    if event_type in {'pet_acquire', 'pet_release', 'pet_update'}:
+        fields = {'protocol_version', 'type', 'lease'}
+        if event_type == 'pet_update':
+            fields |= {'x', 'y', 'facing', 'pose'}
+        _require_exact_fields(payload, fields)
+        lease = _input_request_id(payload['lease'])
+        if event_type == 'pet_acquire':
+            return PetAcquireEvent(lease)
+        if event_type == 'pet_release':
+            return PetReleaseEvent(lease)
+        validate_pet_state(payload['x'], payload['y'], payload['facing'], payload['pose'])
+        return PetUpdateEvent(lease, payload['x'], payload['y'], payload['facing'], payload['pose'])
+    if event_type == 'pause_state':
+        _require_exact_fields(payload, {'protocol_version', 'type', 'paused'})
+        if type(payload['paused']) is not bool:
+            raise ProtocolError('pause_state.paused 必须是布尔值')
+        return PauseStateEvent(payload['paused'])
     if event_type == "status":
         _require_exact_fields(payload, {"protocol_version", "type", "status_title", "title", "detail"})
         return StatusEvent(
@@ -134,6 +289,10 @@ def parse_event_line(line: bytes | str) -> TaskEvent:
     if event_type == "log":
         _require_exact_fields(payload, {"protocol_version", "type", "message"})
         return LogEvent(_required_string(payload, "message"))
+    if event_type == "parameters_applied":
+        _require_exact_fields(payload, {"protocol_version", "type", "request_id", "values"})
+        return ParametersAppliedEvent(_required_positive_integer(payload, "request_id"),
+                                      _parameter_values(payload["values"]))
     if event_type == "speak":
         _require_exact_fields(payload, {"protocol_version", "type", "text", "audio_path", "action"})
         return SpeakEvent(
@@ -144,6 +303,11 @@ def parse_event_line(line: bytes | str) -> TaskEvent:
     if event_type == "point":
         _require_exact_fields(payload, {"protocol_version", "type", "x", "y"})
         return PointEvent(_required_integer(payload, "x"), _required_integer(payload, "y"))
+    if event_type == 'input_request':
+        return _parse_input_request(payload)
+    if event_type == 'input_cancel':
+        _require_exact_fields(payload, {'protocol_version', 'type', 'request_id'})
+        return InputCancelEvent(_input_request_id(payload['request_id']))
     if event_type == "hint":
         _require_exact_fields(payload, {"protocol_version", "type", "kind", "points", "label"})
         kind, points = payload["kind"], payload["points"]
@@ -323,7 +487,14 @@ __all__ = (
     "PROTOCOL_VERSION",
     "FinishedEvent",
     "LogEvent",
+    "ParametersAppliedEvent",
+    "PauseStateEvent",
     "PointEvent",
+    "PetAcquireEvent",
+    "PetUpdateEvent",
+    "PetReleaseEvent",
+    "InputRequestEvent",
+    "InputCancelEvent",
     "HintEvent",
     "PreviewEvent",
     "ProtocolError",
@@ -333,6 +504,11 @@ __all__ = (
     "encode_start_message",
     "encode_step_message",
     "encode_stop_message",
+    "encode_pause_message",
+    "encode_parameter_update",
+    "encode_input_result",
+    "encode_pet_result",
+    "validate_pet_state",
     "parse_event_line",
     "validate_options",
 )

@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from huanzhizhi.widgets import BUTTON_STYLE, ComboBox, ToggleSwitch
 
 from huanzhizhi.pet import PetComponent
 from huanzhizhi.pet.context_menu import display_scale_label
+from .component import CODEX_REASONING_EFFORTS, DEFAULT_CODEX_OPTIONS, SettingsComponent
+from .environment import EnvironmentPage
+from huanzhizhi.agents.codex import adapter as ai_codex
+from huanzhizhi.agents.opencode.guide import OpenCodeGuide
+from huanzhizhi.agents.runtime import SettingsError
 
 if TYPE_CHECKING:
     from huanzhizhi.tasks.component import TaskHostComponent
@@ -23,7 +30,7 @@ class _SettingsWindow(QtWidgets.QWidget):
 
 
 def desktop_pet_settings_style() -> str:
-    return """
+    return BUTTON_STYLE + """
 QWidget#desktopPetSettingsWindow { background: #ffffff; color: #242424; }
 QWidget#desktopPetSettingsSidebar { background: #f8f8f8; border-right: 1px solid #ededed; }
 QLabel#desktopPetSettingsBrand { font-size: 15px; font-weight: 600; padding: 18px 18px 12px 18px; }
@@ -31,98 +38,35 @@ QLabel#desktopPetSettingsSection { color: #777777; font-size: 12px; padding: 8px
 QListWidget#desktopPetSettingsNavigation { border: none; background: transparent; outline: none; padding: 0 8px; }
 QListWidget#desktopPetSettingsNavigation::item { border-radius: 9px; padding: 10px 12px; margin: 2px 0; }
 QListWidget#desktopPetSettingsNavigation::item:selected { background: #e9e9e9; color: #202020; font-weight: 600; }
+QTreeWidget#desktopPetEnvironmentResults { selection-background-color: #e9e9e9; selection-color: #242424; outline: none; }
+QTreeWidget#desktopPetEnvironmentResults::item:selected { background: #e9e9e9; color: #242424; border: none; }
 QWidget#desktopPetSettingsContent { background: #ffffff; }
 QLabel#desktopPetSettingsTitle { font-size: 28px; font-weight: 600; }
 QLabel#desktopPetSettingsGroupTitle { font-size: 16px; font-weight: 600; margin-top: 12px; }
 QFrame#desktopPetSettingsCard { background: #ffffff; border: 1px solid #e9e9e9; border-radius: 16px; }
 QListWidget#desktopPetTaskCards { background: #ffffff; border: none; outline: none; }
 QListWidget#desktopPetTaskCards::item { background: transparent; border: none; }
-QFrame#desktopPetTaskCard { background: #ffffff; border: 1px solid #e9e9e9; border-radius: 14px; }
+QFrame#desktopPetTaskCard { background: #ffffff; border: 1px solid #e9e9e9; border-radius: 4px; }
 QFrame#desktopPetTaskCard:hover { border-color: #b7cdf0; }
+QLabel#desktopPetTaskPageTitle { font-size: 20px; font-weight: 600; }
+QLabel#desktopPetTaskTitle { font-size: 13px; font-weight: 600; }
+QTabBar#desktopPetTaskGroups::tab { color: #757575; background: transparent; padding: 5px 14px; border-bottom: 2px solid transparent; font-size: 12px; }
+QTabBar#desktopPetTaskGroups::tab:selected { color: #397df6; border-bottom-color: #397df6; }
+QToolButton#desktopPetTaskInfo { color: #8993a3; border: none; background: transparent; font-size: 14px; }
+QToolButton#desktopPetTaskEdit { color: #397df6; border: none; background: transparent; font-size: 12px; }
+QToolButton#desktopPetTaskInfo:hover, QToolButton#desktopPetTaskEdit:hover { background: #eef4ff; }
+QToolButton#desktopPetTaskInfo:focus, QToolButton#desktopPetTaskEdit:focus { border: 1px solid #8ab4f8; }
 QLabel#desktopPetSettingsRowTitle { font-size: 14px; font-weight: 600; }
 QLabel#desktopPetSettingsRowDetail { color: #757575; font-size: 12px; }
 QFrame#desktopPetSettingsDivider { background: #eeeeee; max-height: 1px; border: none; }
-QComboBox#desktopPetSettingsCombo { border: 1px solid #e2e2e2; border-radius: 10px; padding: 6px 34px 6px 12px; min-width: 126px; background: #ffffff; }
-QComboBox#desktopPetSettingsCombo:hover { background: #f8f8f8; border-color: #d3d3d3; }
-QComboBox#desktopPetSettingsCombo:focus { border-color: #8ab4f8; }
-QComboBox#desktopPetSettingsCombo::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 28px; border: none; background: transparent; }
 """
-
-
-class _ToggleSwitch(QtWidgets.QCheckBox):
-    """A compact switch with an explicit full-control click target."""
-
-    def __init__(self, accessible_name: str) -> None:
-        super().__init__()
-        self.setObjectName("desktopPetSettingsSwitch")
-        self.setAccessibleName(accessible_name)
-        self.setFixedSize(52, 30)
-        self._thumb_position = 0.0
-        self._thumb_animation = QtCore.QPropertyAnimation(self, b"thumbPosition", self)
-        self._thumb_animation.setDuration(140)
-        self._thumb_animation.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        self.toggled.connect(self._animate_thumb)
-
-    @QtCore.Property(float)
-    def thumbPosition(self) -> float:
-        return self._thumb_position
-
-    @thumbPosition.setter
-    def thumbPosition(self, position: float) -> None:
-        self._thumb_position = min(1.0, max(0.0, float(position)))
-        self.update()
-
-    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        if event.button() == QtCore.Qt.MouseButton.LeftButton and self.rect().contains(
-            event.position().toPoint()
-        ):
-            self.toggle()
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    @QtCore.Slot(bool)
-    def _animate_thumb(self, checked: bool) -> None:
-        self._thumb_animation.stop()
-        self._thumb_animation.setStartValue(self._thumb_position)
-        self._thumb_animation.setEndValue(1.0 if checked else 0.0)
-        self._thumb_animation.start()
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        del event
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        track = self.rect().adjusted(1, 3, -1, -3)
-        painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(QtGui.QColor("#3b82f6") if self.isChecked() else QtGui.QColor("#d5d5d5"))
-        painter.drawRoundedRect(track, track.height() / 2, track.height() / 2)
-        diameter = track.height() - 4
-        minimum_x = track.left() + 2
-        maximum_x = track.right() - diameter - 2
-        x = round(minimum_x + (maximum_x - minimum_x) * self._thumb_position)
-        painter.setBrush(QtGui.QColor("#ffffff"))
-        painter.drawEllipse(x, track.top() + 2, diameter, diameter)
-        painter.end()
-
-
-class _SettingsComboBox(QtWidgets.QComboBox):
-    """Keeps the native combobox behavior with a restrained chevron."""
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        super().paintEvent(event)
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        center_x = self.width() - 18
-        center_y = self.height() // 2
-        painter.setPen(QtGui.QPen(QtGui.QColor("#737373"), 1.5))
-        painter.drawLine(center_x - 5, center_y - 2, center_x, center_y + 3)
-        painter.drawLine(center_x, center_y + 3, center_x + 5, center_y - 2)
-        painter.end()
 
 
 class DesktopPetSettingsComponent(QtCore.QObject):
     """Displays pet preferences and the current host run log."""
 
+    ai_enabled_changed = QtCore.Signal(bool)
+    ai_options_changed = QtCore.Signal()
     error = QtCore.Signal(str)
 
     def __init__(
@@ -132,6 +76,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         parent: QtCore.QObject | None = None,
         *,
         tasks: TaskHostComponent | None = None,
+        settings: SettingsComponent | None = None,
     ) -> None:
         super().__init__(parent)
         if not isinstance(pet, PetComponent):
@@ -140,19 +85,23 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             raise TypeError("log_path 必须是 Path")
         self._pet = pet
         self._tasks = tasks
+        self._settings = settings
         self._log_path = log_path
         self._closed = False
         self._window = _SettingsWindow()
         self._window.setObjectName("desktopPetSettingsWindow")
         self._window.setWindowTitle("幻之之设置")
-        self._window.resize(760, 540)
+        self._window.resize(1040, 540)
         self._window.setMinimumSize(640, 440)
         self._window.setStyleSheet(desktop_pet_settings_style())
         self._build_ui()
         if self._tasks is not None:
             self._tasks.tasks_changed.connect(self._sync_tasks)
+            self._tasks.process.state_changed.connect(self._sync_input_options)
         self._pet.scale_changed.connect(self._sync_scale)
         self._pet.mouse_point_visible_changed.connect(self._sync_mouse_point_visible)
+        self._pet.theme_changed.connect(self._sync_input_options)
+        self._sync_input_options()
 
     @property
     def window(self) -> QtWidgets.QWidget:
@@ -161,6 +110,8 @@ class DesktopPetSettingsComponent(QtCore.QObject):
     def show(self) -> None:
         self._ensure_open()
         self._sync_from_pet()
+        self._sync_codex_options()
+        self._sync_ai_enabled()
         if self._tasks is not None:
             try:
                 if self._tasks.catalog.signature() != self._tasks.catalog.loaded_signature:
@@ -175,8 +126,17 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._window.raise_()
         self._window.activateWindow()
 
+    def show_ai_settings(self) -> None:
+        self._navigation.setCurrentRow(3)
+        self.show()
+
     def close(self) -> None:
         if not self._closed:
+            self._opencode_guide.stop()
+            self._environment_page.stop()
+            # Child destruction may follow collection of this controller's attributes.
+            for watched in self._window.findChildren(QtCore.QObject):
+                watched.removeEventFilter(self)
             self._window.close()
             self._closed = True
 
@@ -195,14 +155,16 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         section.setObjectName("desktopPetSettingsSection")
         self._navigation = QtWidgets.QListWidget()
         self._navigation.setObjectName("desktopPetSettingsNavigation")
+        self._navigation.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._navigation.addItem("常规")
         self._navigation.addItem("运行日志")
         self._navigation.addItem("任务列表")
+        self._navigation.addItem("AI 设置")
+        self._navigation.addItem("外部组件")
         self._navigation.setCurrentRow(0)
         sidebar_layout.addWidget(brand)
         sidebar_layout.addWidget(section)
-        sidebar_layout.addWidget(self._navigation)
-        sidebar_layout.addStretch(1)
+        sidebar_layout.addWidget(self._navigation, 1)
         root.addWidget(sidebar)
 
         content = QtWidgets.QWidget()
@@ -213,12 +175,17 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._pages.addWidget(self._build_general_page())
         self._pages.addWidget(self._build_log_page())
         self._pages.addWidget(self._build_tasks_page())
+        self._pages.addWidget(self._build_ai_page())
+        self._environment_page = EnvironmentPage()
+        self._pages.addWidget(self._environment_page)
+        self._window.closed.connect(self._environment_page.stop)
         content_layout.addWidget(self._pages)
         root.addWidget(content, 1)
         self._navigation.currentRowChanged.connect(self._show_page)
 
     def _build_general_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
+        page.setObjectName("desktopPetSettingsContent")
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -230,7 +197,181 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         layout.addWidget(group_title)
         layout.addWidget(self._build_general_card())
         layout.addStretch(1)
-        return page
+        scroll = QtWidgets.QScrollArea()
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        return scroll
+
+
+    def _build_ai_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page.setObjectName('desktopPetSettingsContent')
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QtWidgets.QLabel('AI 设置')
+        title.setObjectName('desktopPetSettingsTitle')
+        layout.addWidget(title)
+        card = QtWidgets.QFrame()
+        card.setObjectName('desktopPetSettingsCard')
+        rows = QtWidgets.QVBoxLayout(card)
+        self._ai_switch = ToggleSwitch('启用 AI')
+        rows.addLayout(self._row('启用 AI', '关闭后仍可运行已有技能。', self._ai_switch))
+        rows.addWidget(self._divider())
+        self._agent_combo = ComboBox()
+        self._agent_combo.setAccessibleName('AI 工具')
+        self._agent_combo.addItem('Codex', 'codex')
+        self._agent_combo.addItem('OpenCode（免费体验）', 'opencode')
+        rows.addLayout(self._row('AI 工具', '切换工具后需重新启用。', self._agent_combo))
+        rows.addWidget(self._divider())
+        self._codex_fields = QtWidgets.QWidget()
+        codex_rows = QtWidgets.QVBoxLayout(self._codex_fields)
+        codex_rows.setContentsMargins(0, 0, 0, 0)
+        self._model_combo = ComboBox()
+        self._model_combo.setObjectName('desktopPetSettingsCombo')
+        self._model_combo.setAccessibleName('Codex 模型')
+        self._reasoning_combo = ComboBox()
+        self._reasoning_combo.setObjectName('desktopPetSettingsCombo')
+        self._reasoning_combo.setAccessibleName('推理强度')
+        codex_rows.addLayout(self._row('模型', '从 Codex 本机模型目录选择。', self._model_combo))
+        codex_rows.addWidget(self._divider())
+        codex_rows.addLayout(self._row('推理强度', '修改后自动保存。', self._reasoning_combo))
+        rows.addWidget(self._codex_fields)
+        self._opencode_guide = OpenCodeGuide(self._settings)
+        self._opencode_guide.layout().insertLayout(0, self._row(
+            '模型', '可直接体验的免费模型。', self._opencode_guide.model_combo))
+        rows.addWidget(self._opencode_guide)
+        layout.addWidget(card)
+        self._ai_status = QtWidgets.QLabel()
+        self._ai_status.setObjectName('desktopPetSettingsRowDetail')
+        self._ai_status.setWordWrap(True)
+        layout.addWidget(self._ai_status)
+        layout.addStretch(1)
+        self._sync_codex_options()
+        self._sync_ai_enabled()
+        card.setEnabled(self._settings is not None)
+        self._ai_switch.toggled.connect(self._set_ai_enabled)
+        self._model_combo.activated.connect(self._set_codex_model)
+        self._reasoning_combo.currentIndexChanged.connect(self._save_codex_options)
+        self._agent_combo.currentIndexChanged.connect(self._set_agent_tool)
+        self._opencode_guide.changed.connect(self._opencode_changed)
+        self._opencode_guide.busy_changed.connect(self._sync_ai_enabled)
+        self._window.closed.connect(self._opencode_guide.cancel)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        return scroll
+
+    def refresh_ai_availability(self, *_args) -> None:
+        self._sync_ai_enabled()
+        self._sync_input_options()
+
+    def _sync_ai_enabled(self) -> None:
+        enabled = self._settings.get_ai_enabled() if self._settings else False
+        busy = self._settings.ai_work_active() if self._settings else False
+        busy = busy or self._opencode_guide.worker is not None
+        tool = self._settings.get_agent_tool() if self._settings else 'codex'
+        self._agent_combo.blockSignals(True)
+        self._agent_combo.setCurrentIndex(self._agent_combo.findData(tool))
+        self._agent_combo.blockSignals(False)
+        self._agent_combo.setEnabled(self._settings is not None and not busy)
+        self._codex_fields.setVisible(tool == 'codex')
+        self._opencode_guide.setVisible(tool == 'opencode')
+        self._opencode_guide.update_controls()
+        reason = 'AI 正在工作，请先在对话中停止，结束后可修改设置。'
+        if self._opencode_guide.worker is not None:
+            reason = '正在准备 AI，请稍候。'
+        for control in (self._ai_switch, self._model_combo, self._reasoning_combo):
+            control.setEnabled(self._settings is not None and not busy)
+        self._ai_switch.setToolTip(reason if busy else '')
+        self._ai_switch.blockSignals(True)
+        self._ai_switch.setChecked(enabled)
+        self._ai_switch.blockSignals(False)
+        self._ai_switch._thumb_animation.stop()
+        self._ai_switch.thumbPosition = 1.0 if enabled else 0.0
+        self._ai_status.setText(reason if busy else
+            'AI 已启用。' if enabled else
+            'Codex 需自行安装并登录，费用由对应账户承担。')
+        if tool == 'opencode' and not busy:
+            self._ai_status.setText('AI 已启用。' if enabled else '免费额度与可用性由服务商决定。')
+
+    def _set_agent_tool(self):
+        if not self._settings:
+            return
+        try:
+            self._settings.set_agent_tool(self._agent_combo.currentData())
+            self._settings.sync()
+            self._opencode_changed()
+        except Exception as error:
+            self._sync_ai_enabled()
+            self._ai_status.setText(str(error))
+
+    def _opencode_changed(self):
+        self._sync_ai_enabled()
+        self.ai_enabled_changed.emit(self._settings.get_ai_enabled())
+        self.ai_options_changed.emit()
+
+    def _set_ai_enabled(self, enabled: bool) -> None:
+        if self._settings is None:
+            return
+        try:
+            if enabled and self._settings.get_agent_tool() == 'opencode' and not self._settings.is_opencode_verified():
+                self._opencode_guide.enable()
+                self._sync_ai_enabled()
+                return
+            self._settings.set_ai_enabled(enabled)
+            self._settings.sync()
+        except Exception as exc:
+            self._sync_ai_enabled()
+            self._ai_status.setText(f'无法启用 AI：{exc}' if enabled else f'无法关闭 AI：{exc}')
+            return
+        self._sync_ai_enabled()
+        self.ai_enabled_changed.emit(enabled)
+        self.ai_options_changed.emit()
+
+    def _sync_codex_options(self) -> None:
+        self._model_efforts = ai_codex.model_catalog()
+        options = self._settings.get_codex_options() if self._settings else DEFAULT_CODEX_OPTIONS
+        model = options['model']
+        self._model_combo.blockSignals(True)
+        self._model_combo.clear()
+        for key in self._model_efforts:
+            self._model_combo.addItem(key, key)
+        if self._model_combo.findData(model) < 0:
+            self._model_combo.addItem(model, model)
+        self._model_combo.setCurrentIndex(self._model_combo.findData(model))
+        self._model_combo.blockSignals(False)
+        self._sync_reasoning_options(options['reasoning_effort'], preserve=True)
+
+    def _sync_reasoning_options(self, effort: str, *, preserve: bool = False) -> None:
+        efforts = self._model_efforts.get(self._model_combo.currentData(), CODEX_REASONING_EFFORTS)
+        if preserve and effort and effort not in efforts:
+            efforts = (*efforts, effort)
+        self._reasoning_combo.blockSignals(True)
+        self._reasoning_combo.clear()
+        self._reasoning_combo.addItems(list(efforts))
+        self._reasoning_combo.setCurrentText(effort if effort in efforts else ('high' if 'high' in efforts else efforts[0] if efforts else ''))
+        self._reasoning_combo.blockSignals(False)
+
+    def _set_codex_model(self) -> None:
+        self._sync_reasoning_options(self._reasoning_combo.currentText())
+        self._save_codex_options()
+
+    def _save_codex_options(self) -> None:
+        if self._settings is None:
+            return
+        try:
+            if self._settings.ai_work_active():
+                raise SettingsError('AI 正在工作，请先停止后修改设置。')
+            self._settings.set_codex_options({'model': self._model_combo.currentData(),
+                                             'reasoning_effort': self._reasoning_combo.currentText()})
+            self._settings.sync()
+            self._sync_ai_enabled()
+            self.ai_options_changed.emit()
+        except Exception as exc:
+            self._sync_codex_options()
+            self._ai_status.setText(f'保存 AI 设置失败：{exc}')
 
     def _build_log_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
@@ -253,38 +394,111 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(8)
         title = QtWidgets.QLabel("任务列表")
-        title.setObjectName("desktopPetSettingsTitle")
+        title.setObjectName("desktopPetTaskPageTitle")
         detail = QtWidgets.QLabel("选择点击桌宠时显示的任务。修改后自动保存，不影响正在运行的任务。")
         detail.setObjectName("desktopPetSettingsRowDetail")
         detail.setWordWrap(True)
+        self._task_groups = QtWidgets.QTabBar()
+        self._task_groups.setObjectName("desktopPetTaskGroups")
+        self._task_groups.setAccessibleName("任务分组")
+        self._task_groups.setExpanding(False)
+        self._task_groups.addTab("正式")
+        self._task_groups.setTabData(0, "formal")
+        self._task_groups.addTab("测试")
+        self._task_groups.setTabData(1, "test")
         self._task_cards = QtWidgets.QListWidget()
         self._task_cards.setObjectName("desktopPetTaskCards")
         self._task_cards.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
         self._task_cards.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
         self._task_cards.setMovement(QtWidgets.QListView.Movement.Static)
         self._task_cards.setWrapping(True)
-        self._task_cards.setGridSize(QtCore.QSize(232, 266))
+        self._task_cards.setSpacing(0)
+        self._task_cards.setGridSize(QtCore.QSize(360, 48))
+        self._task_cards.viewport().installEventFilter(self)
         self._task_cards.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self._task_cards.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._task_cards.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._task_empty_label = QtWidgets.QLabel(self._task_cards.viewport())
+        self._task_empty_label.setObjectName("desktopPetSettingsRowDetail")
+        self._task_empty_label.move(8, 10)
         self._task_descriptors = None
-        self._task_switches: dict[str, _ToggleSwitch] = {}
-        self._task_log_switches: dict[str, _ToggleSwitch] = {}
+        self._task_items: dict[str, QtWidgets.QListWidgetItem] = {}
+        self._task_switches: dict[str, ToggleSwitch] = {}
+        self._task_log_switches: dict[str, ToggleSwitch] = {}
         self._task_titles: dict[str, QtWidgets.QLabel] = {}
-        self._task_details: dict[str, QtWidgets.QLabel] = {}
+        self._task_details: dict[str, QtWidgets.QToolButton] = {}
         layout.addWidget(title)
         layout.addWidget(detail)
+        layout.addWidget(self._task_groups)
         layout.addWidget(self._task_cards, 1)
+        self._task_groups.currentChanged.connect(self._filter_task_group)
         self._sync_tasks()
         return page
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if self._closed:
+            return super().eventFilter(watched, event)
+        if watched is self._task_cards.viewport():
+            if event.type() == QtCore.QEvent.Type.Resize:
+                QtCore.QTimer.singleShot(0, self._layout_task_cards)
+        elif event.type() == QtCore.QEvent.Type.Resize and isinstance(watched, QtWidgets.QLabel):
+            watched.setText(watched.fontMetrics().elidedText(
+                watched.accessibleName(), QtCore.Qt.TextElideMode.ElideRight, watched.width()
+            ))
+        elif isinstance(watched, QtWidgets.QToolButton) and watched.objectName() == "desktopPetTaskInfo":
+            if event.type() == QtCore.QEvent.Type.Enter:
+                QtWidgets.QToolTip.showText(
+                    watched.mapToGlobal(QtCore.QPoint(0, watched.height())), watched.toolTip(), watched
+                )
+            elif event.type() == QtCore.QEvent.Type.Leave:
+                QtWidgets.QToolTip.hideText()
+        return super().eventFilter(watched, event)
+
+    def _layout_task_cards(self) -> None:
+        if self._closed:
+            return
+        # IconMode reserves scrollbar space when deciding where to wrap, even
+        # before the vertical scrollbar is visible.
+        scrollbar_width = self._task_cards.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_ScrollBarExtent)
+        width = max(1, self._task_cards.maximumViewportSize().width() - scrollbar_width - 2)
+        columns = max(1, width // 360)
+        cell_width = width // columns
+        self._task_cards.setGridSize(QtCore.QSize(cell_width, 48))
+        for index in range(self._task_cards.count()):
+            self._task_cards.item(index).setSizeHint(QtCore.QSize(max(1, cell_width - 8), 42))
+        self._task_cards.doItemsLayout()
+
+    @QtCore.Slot()
+    def _filter_task_group(self) -> None:
+        if self._closed:
+            return
+        selected_group = self._task_groups.tabData(self._task_groups.currentIndex())
+        visible_count = 0
+        for item in self._task_items.values():
+            hidden = item.data(QtCore.Qt.ItemDataRole.UserRole) != selected_group
+            if item.isHidden() != hidden:
+                item.setHidden(hidden)
+            if not hidden:
+                visible_count += 1
+        self._task_empty_label.setText("暂无正式任务。" if selected_group == "formal" else "暂无测试任务。")
+        self._task_empty_label.adjustSize()
+        self._task_empty_label.setVisible(visible_count == 0)
+        self._task_cards.doItemsLayout()
 
     @QtCore.Slot()
     def _sync_tasks(self) -> None:
         if self._closed:
             return
         descriptors = self._tasks.catalog.tasks() if self._tasks is not None else ()
+        preferences_by_id = {
+            descriptor.key: self._tasks.get_task_preferences(descriptor.key) for descriptor in descriptors
+        }
+        for index, label in enumerate(("正式", "测试")):
+            group = self._task_groups.tabData(index)
+            count = sum(p.get("group", "formal") == group for p in preferences_by_id.values())
+            self._task_groups.setTabText(index, f"{label}（{count}）")
         if descriptors == self._task_descriptors:
             for task_id, switch in self._task_switches.items():
                 visible = self._tasks.is_task_visible(task_id)
@@ -293,10 +507,21 @@ class DesktopPetSettingsComponent(QtCore.QObject):
                     switch.setChecked(visible)
                     switch.thumbPosition = float(visible)
                     switch.blockSignals(False)
-                preferences = self._tasks.get_task_preferences(task_id)
-                self._task_titles[task_id].setText(preferences["name"])
-                self._task_details[task_id].setText(preferences["description"] or "暂无任务说明。")
-                self._task_details[task_id].setToolTip(preferences["description"])
+                preferences = preferences_by_id[task_id]
+                self._task_items[task_id].setData(QtCore.Qt.ItemDataRole.UserRole, preferences.get("group", "formal"))
+                title = self._task_titles[task_id]
+                title.setAccessibleName(preferences["name"])
+                title.setText(title.fontMetrics().elidedText(
+                    preferences["name"], QtCore.Qt.TextElideMode.ElideRight, title.width()
+                ))
+                detail = self._task_details[task_id]
+                description = escape(preferences["description"] or "暂无任务说明。").replace("\n", "<br>")
+                detail.setToolTip(f"<qt>{description}</qt>")
+                detail.setAccessibleName(f"{preferences['name']}的任务说明")
+                detail.setAccessibleDescription(preferences["description"] or "暂无任务说明。")
+                title.parentWidget().findChild(QtWidgets.QToolButton, "desktopPetTaskEdit").setAccessibleName(
+                    f"编辑{preferences['name']}"
+                )
                 switch.setAccessibleName(f"显示{preferences['name']}")
                 log_switch = self._task_log_switches[task_id]
                 log_switch.setAccessibleName(f"{preferences['name']}运行时显示日志")
@@ -305,84 +530,98 @@ class DesktopPetSettingsComponent(QtCore.QObject):
                     log_switch.setChecked(preferences["show_logs"])
                     log_switch.thumbPosition = float(preferences["show_logs"])
                     log_switch.blockSignals(False)
+            self._filter_task_group()
             return
         self._task_descriptors = descriptors
         self._task_cards.clear()
+        self._task_items = {}
         self._task_switches = {}
         self._task_log_switches = {}
         self._task_titles = {}
         self._task_details = {}
         for descriptor in descriptors:
-            preferences = self._tasks.get_task_preferences(descriptor.id)
+            preferences = preferences_by_id[descriptor.key]
             card = QtWidgets.QFrame()
             card.setObjectName("desktopPetTaskCard")
-            card_layout = QtWidgets.QVBoxLayout(card)
-            card_layout.setContentsMargins(16, 14, 16, 14)
-            card_layout.setSpacing(8)
+            card_layout = QtWidgets.QHBoxLayout(card)
+            card_layout.setContentsMargins(10, 4, 10, 4)
+            card_layout.setSpacing(6)
             title = QtWidgets.QLabel(preferences["name"])
-            title.setObjectName("desktopPetSettingsRowTitle")
+            title.setObjectName("desktopPetTaskTitle")
             title.setTextFormat(QtCore.Qt.TextFormat.PlainText)
-            title.setWordWrap(True)
-            detail = QtWidgets.QLabel(preferences["description"] or "暂无任务说明。")
-            detail.setObjectName("desktopPetSettingsRowDetail")
-            detail.setTextFormat(QtCore.Qt.TextFormat.PlainText)
-            detail.setWordWrap(True)
-            detail.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
-            detail.setToolTip(preferences["description"])
-            heading = QtWidgets.QHBoxLayout()
-            heading.addWidget(title, 1)
+            title.setAccessibleName(preferences["name"])
+            title.setMinimumWidth(0)
+            title.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+            title.installEventFilter(self)
+            detail = QtWidgets.QToolButton()
+            detail.setObjectName("desktopPetTaskInfo")
+            detail.installEventFilter(self)
+            detail.setIcon(self._window.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation))
+            detail.setIconSize(QtCore.QSize(14, 14))
+            detail.setFixedSize(18, 24)
+            description = escape(preferences["description"] or "暂无任务说明。").replace("\n", "<br>")
+            detail.setToolTip(f"<qt>{description}</qt>")
+            detail.setAccessibleName(f"{preferences['name']}的任务说明")
+            detail.setAccessibleDescription(preferences["description"] or "暂无任务说明。")
+            detail.clicked.connect(
+                lambda _checked=False, button=detail: QtWidgets.QToolTip.showText(
+                    button.mapToGlobal(QtCore.QPoint(0, button.height())), button.toolTip(), button
+                )
+            )
+            card_layout.addWidget(title, 1)
+            card_layout.addWidget(detail)
             edit = QtWidgets.QToolButton()
+            edit.setObjectName("desktopPetTaskEdit")
             edit.setText("编辑")
             edit.setAutoRaise(True)
+            edit.setFixedSize(32, 24)
             edit.setAccessibleName(f"编辑{preferences['name']}")
             edit.clicked.connect(
-                lambda _checked=False, task_id=descriptor.id: self._edit_task(task_id)
+                lambda _checked=False, task_id=descriptor.key: self._edit_task(task_id)
             )
-            heading.addWidget(edit, 0, QtCore.Qt.AlignmentFlag.AlignTop)
-            card_layout.addLayout(heading)
-            card_layout.addWidget(detail, 1)
             switch = self._switch(f"显示{preferences['name']}")
-            visible = self._tasks.is_task_visible(descriptor.id)
+            switch.setFixedSize(30, 22)
+            switch.setToolTip("在点击桌宠时显示此任务")
+            visible = self._tasks.is_task_visible(descriptor.key)
             switch.blockSignals(True)
             switch.setChecked(visible)
             switch.thumbPosition = float(visible)
             switch.blockSignals(False)
             switch.toggled.connect(
-                lambda checked, task_id=descriptor.id: self._set_task_visible(task_id, checked)
+                lambda checked, task_id=descriptor.key: self._set_task_visible(task_id, checked)
             )
-            controls = QtWidgets.QHBoxLayout()
-            label = QtWidgets.QLabel("显示任务")
+            label = QtWidgets.QLabel("显示")
             label.setObjectName("desktopPetSettingsRowDetail")
-            controls.addWidget(label)
-            controls.addStretch(1)
-            controls.addWidget(switch)
-            card_layout.addLayout(controls)
+            card_layout.addWidget(label)
+            card_layout.addWidget(switch)
             log_switch = self._switch(f"{preferences['name']}运行时显示日志")
+            log_switch.setFixedSize(30, 22)
             log_switch.blockSignals(True)
             log_switch.setChecked(preferences["show_logs"])
             log_switch.thumbPosition = float(preferences["show_logs"])
             log_switch.blockSignals(False)
             log_switch.setToolTip("关闭后，运行气泡只显示“运行中”；运行日志仍会保存。")
             log_switch.toggled.connect(
-                lambda checked, task_id=descriptor.id: self._set_task_logs_visible(task_id, checked)
+                lambda checked, task_id=descriptor.key: self._set_task_logs_visible(task_id, checked)
             )
-            log_controls = QtWidgets.QHBoxLayout()
-            log_label = QtWidgets.QLabel("运行时显示日志")
+            log_label = QtWidgets.QLabel("日志")
             log_label.setObjectName("desktopPetSettingsRowDetail")
-            log_controls.addWidget(log_label)
-            log_controls.addStretch(1)
-            log_controls.addWidget(log_switch)
-            card_layout.addLayout(log_controls)
+            card_layout.addWidget(log_label)
+            card_layout.addWidget(log_switch)
+            card_layout.addSpacing(4)
+            card_layout.addWidget(edit)
             item = QtWidgets.QListWidgetItem()
-            item.setSizeHint(QtCore.QSize(220, 254))
+            item.setSizeHint(QtCore.QSize(352, 42))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, preferences.get("group", "formal"))
             self._task_cards.addItem(item)
             self._task_cards.setItemWidget(item, card)
-            self._task_switches[descriptor.id] = switch
-            self._task_log_switches[descriptor.id] = log_switch
-            self._task_titles[descriptor.id] = title
-            self._task_details[descriptor.id] = detail
-        if not descriptors:
-            self._task_cards.addItem("暂无可用任务。")
+            self._task_items[descriptor.key] = item
+            self._task_switches[descriptor.key] = switch
+            self._task_log_switches[descriptor.key] = log_switch
+            self._task_titles[descriptor.key] = title
+            self._task_details[descriptor.key] = detail
+        self._filter_task_group()
+        self._layout_task_cards()
 
     def _set_task_logs_visible(self, task_id: str, visible: bool) -> None:
         if self._tasks is None:
@@ -408,6 +647,13 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         name.setObjectName("taskNameEdit")
         name.setAccessibleName("任务名称")
         layout.addWidget(name)
+        group = QtWidgets.QLabel('当前分组：' + ('测试' if preferences['group'] == 'test' else '正式'))
+        group.setObjectName('taskGroupLabel')
+        layout.addWidget(group)
+        move = QtWidgets.QPushButton('加入正式' if preferences['group'] == 'test' else '移回测试')
+        move.setObjectName('taskGroupMove')
+        move.setAccessibleName(move.text())
+        layout.addWidget(move)
         layout.addWidget(QtWidgets.QLabel("任务介绍"))
         description = QtWidgets.QPlainTextEdit(preferences["description"])
         description.setObjectName("taskDescriptionEdit")
@@ -421,6 +667,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         buttons = QtWidgets.QDialogButtonBox()
         save = buttons.addButton("保存", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton("取消", QtWidgets.QDialogButtonBox.ButtonRole.RejectRole)
+        save.setProperty("primary", True)
         save.setDefault(True)
         layout.addWidget(buttons)
 
@@ -438,8 +685,46 @@ class DesktopPetSettingsComponent(QtCore.QObject):
 
         buttons.accepted.connect(save_changes)
         buttons.rejected.connect(dialog.reject)
+        def move_task() -> None:
+            if preferences['group'] == 'test':
+                changed = self.promote_task(task_id)
+            else:
+                try:
+                    self._tasks.demote_task(task_id)
+                    self._task_groups.setCurrentIndex(1)
+                    changed = True
+                except Exception as exc:
+                    error_label.setText(str(exc))
+                    return
+            if changed:
+                dialog.accept()
+        move.clicked.connect(move_task)
         dialog.exec()
         dialog.deleteLater()
+
+    def promote_task(self, task_id: str) -> bool:
+        """Only connected to explicit user actions in skill details/settings."""
+        if self._tasks is None:
+            return False
+        try:
+            task = self._tasks.catalog.get(task_id)
+            formal = next((item for item in self._tasks.catalog.tasks()
+                           if item.id == task.id and item.group == 'formal'), None)
+            replace = formal is not None
+            if replace:
+                answer = QtWidgets.QMessageBox.question(
+                    self._window, '替换正式技能',
+                    f'将用测试版“{task.name}”替换正式版“{formal.name}”。\n旧正式版会先备份。是否继续？',
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.No)
+                if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return False
+            self._tasks.promote_task(task_id, replace_existing=replace)
+            self._task_groups.setCurrentIndex(0)
+            return True
+        except Exception as exc:
+            self.error.emit(f'加入正式失败：{exc}')
+            return False
 
     def _set_task_visible(self, task_id: str, visible: bool) -> None:
         if self._tasks is None:
@@ -456,21 +741,37 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         layout = QtWidgets.QVBoxLayout(card)
         layout.setContentsMargins(20, 12, 20, 12)
         layout.setSpacing(0)
-        self._scale_combo = _SettingsComboBox()
+        self._scale_combo = ComboBox()
         self._scale_combo.setObjectName("desktopPetSettingsCombo")
         for scale in self._scale_options():
             self._scale_combo.addItem(display_scale_label(scale), scale)
+        self._input_mode_combo = ComboBox()
+        self._input_mode_combo.setObjectName("desktopPetInputMode")
+        self._input_mode_combo.setAccessibleName("操作模式")
+        self._input_mode_combo.addItem("后台操作", "background")
+        self._input_mode_combo.addItem("前台操作", "foreground")
+        self._theme_combo = ComboBox()
+        self._theme_combo.setObjectName("desktopPetTheme")
+        self._theme_combo.setAccessibleName("桌宠主题")
+        for title, theme in (("星际飞碟", "ufo"), ("魔法扫帚", "broom")):
+            self._theme_combo.addItem(title, theme)
         self._mouse_checkbox = self._switch("点击时显示指向动作")
         layout.addLayout(self._row("桌宠大小", "调整桌宠在屏幕上的显示大小。", self._scale_combo))
         layout.addWidget(self._divider())
+        layout.addLayout(self._row("操作模式", "后台操作直接点击目标窗口；前台操作移动鼠标并同步桌宠动作。", self._input_mode_combo))
+        layout.addWidget(self._divider())
+        layout.addLayout(self._row("桌宠主题", "选择之之的外观与动作。", self._theme_combo))
+        layout.addWidget(self._divider())
         layout.addLayout(self._row("点击指向", "启用后，鼠标点击会显示桌宠的指向动作。", self._mouse_checkbox))
         self._scale_combo.currentIndexChanged.connect(self._set_scale)
+        self._input_mode_combo.currentIndexChanged.connect(self._set_input_mode)
+        self._theme_combo.currentIndexChanged.connect(self._set_pet_theme)
         self._mouse_checkbox.toggled.connect(self._pet.set_mouse_point_visible)
         return card
 
     @staticmethod
-    def _switch(accessible_name: str) -> _ToggleSwitch:
-        return _ToggleSwitch(accessible_name)
+    def _switch(accessible_name: str) -> ToggleSwitch:
+        return ToggleSwitch(accessible_name)
 
     @staticmethod
     def _row(title: str, detail: str, control: QtWidgets.QWidget) -> QtWidgets.QHBoxLayout:
@@ -515,6 +816,50 @@ class DesktopPetSettingsComponent(QtCore.QObject):
     def _sync_from_pet(self) -> None:
         self._sync_scale(self._pet.display_scale, QtCore.QPoint())
         self._sync_mouse_point_visible(self._pet.mouse_point_visible)
+        self._sync_input_options()
+
+    def _sync_input_options(self, *_args) -> None:
+        if self._closed:
+            return
+        busy = (
+            self._tasks is not None and self._tasks.process.state != "idle"
+            or self._settings is not None and self._settings.ai_work_active()
+        )
+        reason = "任务或 AI 正在工作，结束后可切换。" if busy else ""
+        mode = self._settings.get_input_mode() if self._settings else "background"
+        for control, value in ((self._input_mode_combo, mode), (self._theme_combo, self._pet.theme)):
+            control.blockSignals(True)
+            control.setCurrentIndex(control.findData(value))
+            control.blockSignals(False)
+            control.setEnabled(not busy)
+            control.setToolTip(reason)
+        if self._settings is None:
+            self._input_mode_combo.setEnabled(False)
+
+    @QtCore.Slot(int)
+    def _set_input_mode(self, index: int) -> None:
+        mode = self._input_mode_combo.itemData(index)
+        self._sync_input_options()
+        if not self._input_mode_combo.isEnabled():
+            return
+        try:
+            self._settings.set_input_mode(mode)
+            self._settings.sync()
+        except Exception as exc:
+            self.error.emit(f"更新操作模式失败：{exc}")
+        self._sync_input_options()
+
+    @QtCore.Slot(int)
+    def _set_pet_theme(self, index: int) -> None:
+        theme = self._theme_combo.itemData(index)
+        self._sync_input_options()
+        if not self._theme_combo.isEnabled():
+            return
+        try:
+            self._pet.set_theme(theme)
+        except Exception as exc:
+            self.error.emit(f"更新桌宠主题失败：{exc}")
+        self._sync_input_options()
 
 
     @QtCore.Slot(float, QtCore.QPoint)

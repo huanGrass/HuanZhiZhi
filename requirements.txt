@@ -1,0 +1,6 @@
+# Versions already used and tested by this project; shared by host, tasks and AI scripts.
+windows-capture==2.0.1
+numpy==1.23.5
+opencv-python==4.9.0.80
+Pillow==12.3.0
+PySide6-Essentials==6.11.2

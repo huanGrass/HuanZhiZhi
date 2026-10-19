@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "huanzhizhi"
-version = "0.1.0"
-description = "幻之之 Windows 桌宠任务助手"
+version = "0.2.0"
+description = "幻之之 极简桌宠任务助手"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
-dependencies = ["windows-capture>=2,<3", "numpy>=1.23,<3", "opencv-python>=4.9,<5", "Pillow>=11,<13", "PySide6>=6.8,<7"]
+dependencies = ["windows-capture>=2,<3", "numpy>=1.23,<3", "opencv-python>=4.9,<5", "Pillow>=11,<13", "PySide6-Essentials==6.11.2"]
 
 [project.gui-scripts]
 huanzhizhi = "huanzhizhi.__main__:main"
@@ -21,5 +21,8 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-huanzhizhi = ["assets/*.png", "assets/point/*.png"]
+huanzhizhi = ["*.md", "assets/*.png", "assets/themes/*.json", "assets/themes/*/*.webp", "assets/dock/*.svg", "assets/dock/LICENSE.txt", "shared_components.json"]
+"huanzhizhi.vision" = ["*.ps1"]
 
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"

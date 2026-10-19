@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from huanzhizhi.widgets import apply_menu_style
 
 
 DEFAULT_DISPLAY_SCALE = 0.32
@@ -48,48 +49,6 @@ def display_scale_label(display_scale: float) -> str:
     return f"{percent}%"
 
 
-def pet_context_menu_style() -> str:
-    """Return the logical-pixel menu style managed by Qt."""
-    def px(value: int) -> int:
-        return value
-
-    return f"""
-QMenu#desktopPetContextMenu {{
-    background: #ffffff;
-    border: {px(1)}px solid #d0d7e2;
-    border-radius: {px(8)}px;
-    font-size: {px(14)}px;
-    padding: {px(5)}px 0;
-}}
-QMenu#desktopPetContextMenu::item {{
-    color: #1f2937;
-    min-width: {px(168)}px;
-    min-height: {px(30)}px;
-    padding: {px(6)}px {px(30)}px {px(6)}px {px(14)}px;
-    border-radius: {px(6)}px;
-}}
-QMenu#desktopPetContextMenu::item:selected {{
-    background: #eef4ff;
-    color: #111827;
-}}
-QMenu#desktopPetContextMenu::indicator {{
-    width: {px(16)}px;
-    height: {px(16)}px;
-    padding-left: {px(2)}px;
-}}
-QMenu#desktopPetContextMenu::right-arrow {{
-    width: {px(10)}px;
-    height: {px(10)}px;
-    padding-right: {px(10)}px;
-}}
-QMenu#desktopPetContextMenu::separator {{
-    height: {px(1)}px;
-    background: #e5e7eb;
-    margin: {px(5)}px 0;
-}}
-"""
-
-
 class PetContextMenu(QtWidgets.QMenu):
     """Desktop-pet menu that reports intent without operating application state."""
 
@@ -116,14 +75,14 @@ class PetContextMenu(QtWidgets.QMenu):
             self._scale_options = tuple(sorted((*self._scale_options, current_scale)))
         self._open = False
         self.setObjectName("desktopPetContextMenu")
-        self._apply_menu_style(self)
+        apply_menu_style(self)
 
         self.settings_action = self.addAction("设置")
         self.hide_action = self.addAction("收起之之")
         self.addSeparator()
         self.size_menu = self.addMenu("大小")
         self.size_menu.setObjectName("desktopPetContextMenu")
-        self._apply_menu_style(self.size_menu)
+        apply_menu_style(self.size_menu)
 
         self.scale_actions: dict[QtGui.QAction, float] = {}
         self._scale_action_group = QtGui.QActionGroup(self)
@@ -170,8 +129,8 @@ class PetContextMenu(QtWidgets.QMenu):
         screen = QtGui.QGuiApplication.screenAt(global_position)
         if screen is None:
             raise RuntimeError("cannot determine the context-menu screen")
-        self._apply_menu_style(self)
-        self._apply_menu_style(self.size_menu)
+        apply_menu_style(self)
+        apply_menu_style(self.size_menu)
         try:
             return self.exec(global_position)
         finally:
@@ -181,26 +140,12 @@ class PetContextMenu(QtWidgets.QMenu):
         self.close()
         self._set_open(False)
 
-    @staticmethod
-    def _apply_menu_style(menu: QtWidgets.QMenu) -> None:
-        font = menu.font()
-        font.setPixelSize(14)
-        menu.setFont(font)
-        menu.setStyleSheet(pet_context_menu_style())
-
     def _set_open(self, open_: bool) -> None:
         open_ = bool(open_)
         if self._open == open_:
             return
         self._open = open_
         self.open_changed.emit(open_)
-
-    @staticmethod
-    def _primary_screen() -> QtGui.QScreen:
-        screen = QtGui.QGuiApplication.primaryScreen()
-        if screen is None:
-            raise RuntimeError("no screen is available for the context menu")
-        return screen
 
 
 def _validated_scale(value: float) -> float:
@@ -233,5 +178,4 @@ __all__ = [
     "PetContextMenu",
     "display_scale_label",
     "display_scale_options",
-    "pet_context_menu_style",
 ]

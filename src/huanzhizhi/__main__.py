@@ -1,6 +1,7 @@
 import sys
 from PySide6 import QtCore, QtWidgets
 from huanzhizhi.application import HuanZhiZhiApplication
+from huanzhizhi.python_runtime import python_executable
 
 
 def main():
@@ -26,8 +27,8 @@ def main():
             host._close_components()
         lock.detach()
     if host is not None and host.restart_requested:
-        arguments = [] if getattr(sys, 'frozen', False) else ['-m', 'huanzhizhi']
-        started, _pid = QtCore.QProcess.startDetached(sys.executable, arguments)
+        arguments = ['-I', '-X', 'utf8', '-m', 'huanzhizhi']
+        started, _pid = QtCore.QProcess.startDetached(str(python_executable().with_name('pythonw.exe')), arguments)
         if not started:
             return 1
     return exit_code

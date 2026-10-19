@@ -3,38 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
-
-
-def tray_menu_style() -> str:
-
-    def px(value: int) -> int:
-        return value
-
-    return f"""
-QMenu#trayContextMenu {{
-    background: #ffffff;
-    border: {px(1)}px solid #d0d7e2;
-    border-radius: {px(8)}px;
-    font-size: {px(14)}px;
-    padding: {px(5)}px 0;
-}}
-QMenu#trayContextMenu::item {{
-    color: #1f2937;
-    min-width: {px(210)}px;
-    min-height: {px(32)}px;
-    padding: {px(6)}px {px(30)}px {px(6)}px {px(16)}px;
-    border-radius: {px(6)}px;
-}}
-QMenu#trayContextMenu::item:selected {{
-    background: #eef4ff;
-    color: #111827;
-}}
-QMenu#trayContextMenu::separator {{
-    height: {px(1)}px;
-    background: #e5e7eb;
-    margin: {px(5)}px 0;
-}}
-"""
+from huanzhizhi.widgets import apply_menu_style
 
 
 class TrayComponent(QtCore.QObject):
@@ -50,7 +19,7 @@ class TrayComponent(QtCore.QObject):
 
         self._menu = QtWidgets.QMenu()
         self._menu.setObjectName("trayContextMenu")
-        self._apply_menu_style()
+        apply_menu_style(self._menu)
 
         self._settings_action = self._menu.addAction("设置")
         self._visibility_action = self._menu.addAction("收起之之")
@@ -86,12 +55,6 @@ class TrayComponent(QtCore.QObject):
             self.show_pet_requested.emit()
         elif reason == QtWidgets.QSystemTrayIcon.ActivationReason.Context:
             cursor_pos = QtGui.QCursor.pos()
-            self._apply_menu_style()
+            apply_menu_style(self._menu)
             self._menu.close()
             self._menu.exec(cursor_pos)
-
-    def _apply_menu_style(self) -> None:
-        menu_font = self._menu.font()
-        menu_font.setPixelSize(14)
-        self._menu.setFont(menu_font)
-        self._menu.setStyleSheet(tray_menu_style())

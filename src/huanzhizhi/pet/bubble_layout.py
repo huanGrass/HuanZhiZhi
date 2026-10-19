@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui
 
 
 REFERENCE_PET_SCALE = 0.32
@@ -126,7 +126,8 @@ class BubbleLayoutManager:
         max_width = max(bubble.width() for bubble in bubbles)
         total_height = sum(bubble.height() for bubble in bubbles) + gap * (len(bubbles) - 1)
         y = pet_rect.center().y() - total_height // 2
-        x = pet_rect.left() - gap - max_width if side == "left" else pet_rect.right() + gap
+        side_gap = max(1, round(gap / 4))
+        x = pet_rect.left() - side_gap - max_width if side == "left" else pet_rect.right() + side_gap
         stack_rect = QtCore.QRect(x, y, max_width, total_height)
         clamped = BubbleLayoutManager._clamped_pos(stack_rect, geometry)
         x, y = clamped.x(), clamped.y()

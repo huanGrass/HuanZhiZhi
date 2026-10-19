@@ -7,3 +7,16 @@ artifacts/
 logs/
 dist/
 build/
+python/
+output/
+.vscode/
+/test_tasks/
+/dependencies/*
+!/dependencies/README.md
+/tasks/
+
+# Local settings and credentials
+/settings.ini
+.env
+.env.*
+!/.env.example

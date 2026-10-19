@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from html import escape
+from pathlib import Path
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
 
-from huanzhizhi.pet.bubble_layout import bubble_scale_for_display
+from huanzhizhi.pet.bubble_layout import SCALE_BOOST, bubble_scale_for_display
 from huanzhizhi.platform.window_policy import WindowPolicy
 
 
@@ -14,8 +16,8 @@ _MAX_WIDTH = 280
 _DETAIL_SCALE_FACTOR = 0.8
 _MAX_DETAIL_SCALE = 1.35
 _POP_DURATION_MS = 160
-_LAYOUT_MODES = {"stack", "compact"}
-_BUTTON_KINDS = {"secondary", "primary", "danger"}
+_LAYOUT_MODES = {"stack", "compact", "actions"}
+_BUTTON_KINDS = {"secondary", "primary", "danger", "quiet"}
 
 
 class TaskBubbleWindow(QtWidgets.QWidget):
@@ -38,6 +40,7 @@ class TaskBubbleWindow(QtWidgets.QWidget):
         self.click_key = ""
         self.layout_mode = "stack"
         self.accent_index = 0
+        self.is_test = False
         self.content_signature: tuple | None = None
         self._pop_animation: QtCore.QParallelAnimationGroup | None = None
         self._pop_target_geometry = QtCore.QRect()
@@ -48,14 +51,22 @@ class TaskBubbleWindow(QtWidgets.QWidget):
         self.title_label = QtWidgets.QLabel(self)
         self.title_label.setObjectName("petTaskBubbleTitle")
         self.title_label.setWordWrap(True)
+        self.test_badge = QtWidgets.QLabel("试", self)
+        self.test_badge.setObjectName("petTaskBubbleTestBadge")
+        self.test_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.test_badge.setToolTip("测试版本")
+        self.test_badge.setAccessibleName("测试版本")
+        self.test_badge.hide()
         self.detail_label = QtWidgets.QLabel(self)
         self.detail_label.setObjectName("petTaskBubbleDetail")
         self.detail_label.setWordWrap(True)
         self.button_row = QtWidgets.QHBoxLayout()
+        self.primary_row = QtWidgets.QHBoxLayout()
 
         self.bubble_layout = QtWidgets.QVBoxLayout(self)
         self.bubble_layout.addWidget(self.title_label)
         self.bubble_layout.addWidget(self.detail_label)
+        self.bubble_layout.addLayout(self.primary_row)
         self.bubble_layout.addLayout(self.button_row)
 
         self._apply_scaled_style()
@@ -69,6 +80,7 @@ class TaskBubbleWindow(QtWidgets.QWidget):
         click_key: str = "",
         layout_mode: str = "stack",
         accent_index: int = 0,
+        is_test: bool = False,
     ) -> None:
         if not isinstance(title, str) or not title.strip():
             raise ValueError("任务气泡标题不能为空")
@@ -80,24 +92,29 @@ class TaskBubbleWindow(QtWidgets.QWidget):
             raise ValueError(f"不支持的任务气泡布局模式：{layout_mode}")
         if isinstance(accent_index, bool) or not isinstance(accent_index, int):
             raise TypeError("强调色索引必须是整数")
+        if not isinstance(is_test, bool):
+            raise TypeError("测试版本标识必须是布尔值")
         if buttons is not None and (
             not isinstance(buttons, Sequence) or isinstance(buttons, (str, bytes))
         ):
             raise TypeError("按钮集合必须是序列")
         normalized = tuple(self._validate_button(item) for item in buttons or ())
-        signature = (title, detail, normalized, click_key, layout_mode, accent_index)
+        signature = (title, detail, normalized, click_key, layout_mode, accent_index, is_test)
         if signature == self.content_signature:
             return
         self.content_signature = signature
         self.click_key = click_key
         self.layout_mode = layout_mode
         self.accent_index = accent_index
+        self.is_test = is_test
+        self.test_badge.setVisible(is_test)
         self.setCursor(
             QtCore.Qt.CursorShape.PointingHandCursor
             if click_key
             else QtCore.Qt.CursorShape.ArrowCursor
         )
         self.title_label.setText(title)
+        self.detail_label.setTextFormat(QtCore.Qt.TextFormat.RichText if layout_mode == 'actions' else QtCore.Qt.TextFormat.PlainText)
         self.detail_label.setText(detail)
         self.detail_label.setVisible(bool(detail.strip()))
         self._clear_buttons()
@@ -105,11 +122,13 @@ class TaskBubbleWindow(QtWidgets.QWidget):
             button = QtWidgets.QPushButton(label)
             button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             button.setProperty("kind", kind)
+            button.setProperty('icon_name', {'parameters': 'sliders-horizontal', 'edit_skill': 'pencil'}.get(key, ''))
             button.setEnabled(enabled)
             button.clicked.connect(
                 lambda _checked=False, action_key=key: self.clicked.emit(action_key)
             )
-            self.button_row.addWidget(button)
+            row = self.primary_row if layout_mode == 'actions' and kind == 'primary' else self.button_row
+            row.addWidget(button)
             if self.isVisible():
                 button.show()
         self._apply_scaled_style()
@@ -150,6 +169,10 @@ class TaskBubbleWindow(QtWidgets.QWidget):
         self._stop_pop_animation()
         self.setWindowOpacity(1.0)
         super().hide()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.test_badge.move(self.width() - self.test_badge.width() - self._scaled_int(7), self._scaled_int(5))
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         del event
@@ -236,12 +259,12 @@ class TaskBubbleWindow(QtWidgets.QWidget):
             animation.stop()
 
     def _clear_buttons(self) -> None:
-        while self.button_row.count():
-            item = self.button_row.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()
-                widget.deleteLater()
+        for row in (self.primary_row, self.button_row):
+            while row.count():
+                widget = row.takeAt(0).widget()
+                if widget is not None:
+                    widget.hide()
+                    widget.deleteLater()
 
     def _fit_content_width(self) -> None:
         self.ensurePolished()
@@ -250,19 +273,31 @@ class TaskBubbleWindow(QtWidgets.QWidget):
             label.ensurePolished()
             metrics = label.fontMetrics()
             for line in label.text().splitlines():
-                width = max(width, metrics.horizontalAdvance(line) + self._scaled_int(4))
+                width = max(width, metrics.horizontalAdvance(line) + self._scaled_int(4) + label.contentsMargins().right())
         width = min(self._scaled_int(_MAX_WIDTH), width)
-        buttons = [self.button_row.itemAt(i).widget() for i in range(self.button_row.count())]
-        for button in buttons:
-            button.ensurePolished()
-        if buttons:
-            button_width = sum(button.sizeHint().width() for button in buttons)
-            button_width += self.button_row.spacing() * (len(buttons) - 1)
-            width = max(width, button_width)
+        if self.layout_mode == 'actions':
+            width = self._scaled_int(240)
+        for row in (self.primary_row, self.button_row):
+            buttons = [row.itemAt(i).widget() for i in range(row.count())]
+            for button in buttons:
+                button.ensurePolished()
+            if buttons:
+                button_width = sum(button.sizeHint().width() for button in buttons)
+                button_width += row.spacing() * (len(buttons) - 1)
+                width = max(width, button_width)
         self.title_label.setFixedWidth(width)
         self.detail_label.setFixedWidth(width)
 
     def _apply_scaled_style(self) -> None:
+        self.test_badge.setFixedSize(self._scaled_int(18), self._scaled_int(18))
+        self.test_badge.setStyleSheet(
+            f'background: #fff0da; color: #a46019; border-radius: {self._scaled_int(5)}px; '
+            f'font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; font-size: {self._scaled_int(11)}px; font-weight: 500;'
+        )
+        self.test_badge.move(self.width() - self.test_badge.width() - self._scaled_int(7), self._scaled_int(5))
+        self.title_label.setContentsMargins(0, 0, self._scaled_int(22) if self.is_test else 0, 0)
+        self.title_label.setMinimumHeight(0)
+        self.detail_label.setContentsMargins(0, 0, 0, 0)
         if self.layout_mode == "compact":
             shadow_offset = self._shadow_offset()
             self.bubble_layout.setContentsMargins(
@@ -281,30 +316,54 @@ class TaskBubbleWindow(QtWidgets.QWidget):
             )
             return
         shadow_offset = self._shadow_offset()
+        actions = self.layout_mode == 'actions'
         self.bubble_layout.setContentsMargins(
-            self._scaled_int(14),
-            self._scaled_int(10),
-            self._scaled_int(14),
-            self._scaled_int(10) + shadow_offset,
+            self._scaled_int(15 if actions else 14),
+            self._scaled_int(15 if actions else 10),
+            self._scaled_int(15 if actions else 14),
+            self._scaled_int(15 if actions else 10) + shadow_offset,
         )
+        self.title_label.setMinimumHeight(self._scaled_int(30) if actions else 0)
+        self.detail_label.setContentsMargins(0, self._scaled_int(1) if actions else 0, 0, self._scaled_int(6) if actions else 0)
         self.bubble_layout.setSpacing(self._scaled_int(6))
         self.button_row.setSpacing(self._scaled_int(6))
+        self.primary_row.setSpacing(self._scaled_int(6))
         title_size, detail_size, button_size = (
             self._scaled_int(16), self._scaled_int(13), self._scaled_int(13)
         )
-        button_height, radius = self._scaled_int(28), self._scaled_int(7)
+        if actions:
+            detail = escape(self.content_signature[1]).replace('\n', '<br>')
+            self.detail_label.setText(f'<p style="line-height:{self._scaled_int(22)}px; margin:0">{detail}</p>')
+        button_height, radius = self._scaled_int(26 if actions else 28), self._scaled_int(7)
+        weight = 500 if actions else 800
         self.setStyleSheet(
-            f'QLabel#petTaskBubbleTitle {{ color: #2f2a24; font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; font-size: {title_size}px; font-weight: 800; }}'
+            f'QLabel#petTaskBubbleTitle {{ color: #2f2a24; font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; font-size: {title_size}px; font-weight: {weight}; }}'
             f'QLabel#petTaskBubbleDetail {{ color: #695f52; font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; font-size: {detail_size}px; }}'
-            f'QPushButton {{ background: #f3eadc; border: 1px solid #d8c9b5; border-radius: {radius}px; color: #3b3128; font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; font-size: {button_size}px; font-weight: 800; min-height: {button_height}px; padding: 2px {self._scaled_int(10)}px; }}'
+            f'QPushButton {{ background: #f3eadc; border: 1px solid #d8c9b5; border-radius: {radius}px; color: #3b3128; font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; font-size: {button_size}px; font-weight: {weight}; min-height: {button_height}px; padding: 2px {self._scaled_int(10)}px; }}'
             "QPushButton:hover { background: #eadcca; }"
-            "QPushButton[kind=\"primary\"] { background: #2563eb; border-color: #1d4ed8; color: #ffffff; }"
+            f'QPushButton[kind="primary"] {{ background: #2563eb; border-color: {"#2563eb" if actions else "#1d4ed8"}; color: #ffffff; }}'
             "QPushButton[kind=\"primary\"]:hover { background: #1d4ed8; }"
+            "QPushButton[kind=\"quiet\"] { background: transparent; border-color: transparent; color: #695f52; font-weight: 500; }"
+            "QPushButton[kind=\"quiet\"]:hover { background: #f3eadc; color: #3b3128; }"
             "QPushButton[kind=\"danger\"] { background: #dc2626; border-color: #b91c1c; color: #ffffff; }"
             "QPushButton[kind=\"danger\"]:hover { background: #b91c1c; }"
             "QPushButton[kind=\"danger\"]:pressed { background: #991b1b; }"
             "QPushButton:disabled { background: #f3eadc; border-color: #d8c9b5; color: #969ba3; }"
         )
+        for button in self.findChildren(QtWidgets.QPushButton):
+            name = button.property('icon_name')
+            if not name:
+                continue
+            size = self._scaled_int(14)
+            svg = (Path(__file__).parents[1] / 'assets/dock' / (name+'.svg')).read_bytes().replace(b'currentColor', b'#695f52')
+            pixmap = QtGui.QPixmap(size*2, size*2)
+            pixmap.setDevicePixelRatio(2)
+            pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(pixmap)
+            QtSvg.QSvgRenderer(svg).render(painter, QtCore.QRectF(0, 0, size, size))
+            painter.end()
+            button.setIcon(QtGui.QIcon(pixmap))
+            button.setIconSize(QtCore.QSize(size, size))
 
     def _shadow_offset(self) -> int:
         return self._scaled_int(3 if self.layout_mode == "compact" else 4)
@@ -323,7 +382,9 @@ class TaskBubbleWindow(QtWidgets.QWidget):
 
     def _scaled_int(self, value: float) -> int:
         scale = self.bubble_scale
-        if self.layout_mode == "stack":
+        if self.layout_mode == 'actions':
+            scale = min(scale / SCALE_BOOST, _MAX_DETAIL_SCALE)
+        elif self.layout_mode != "compact":
             scale = min(scale * _DETAIL_SCALE_FACTOR, _MAX_DETAIL_SCALE)
         return max(1, round(value * scale))
 

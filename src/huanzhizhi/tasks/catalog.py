@@ -1,22 +1,21 @@
-"""Strict subprocess-based discovery of external task packages."""
+"""Strict, data-only discovery of external task packages from skill.json."""
 
 from __future__ import annotations
 
 import json
 import os
 import stat as stat_module
-import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from huanzhizhi.parameters import IntegerParameter, parse_parameters
+from huanzhizhi.parameters import ChoiceParameter, IntegerParameter, parse_parameters
 
 
 PROTOCOL_VERSION = 1
-_REQUIRED_FIELDS = frozenset({"protocol_version", "id", "name"})
-_ALLOWED_FIELDS = _REQUIRED_FIELDS | {"description", "presentation", "debug_steps", "parameters"}
+_REQUIRED_FIELDS = frozenset({"protocol_version", "id"})
+_ALLOWED_FIELDS = _REQUIRED_FIELDS | {"name", "description", "presentation", "debug_steps", "parameters", "environment_checks"}
 _PRESENTATION_MODES = frozenset({"persistent", "launch_only"})
-TaskSignature = tuple[tuple[str, int, int], ...]
+TaskSignature = tuple[tuple[str, int, int, int, int], ...]
 
 
 class TaskCatalogError(RuntimeError):
@@ -31,34 +30,33 @@ class TaskDescriptor:
     script_path: Path
     presentation: str = "persistent"
     debug_steps: tuple[str, ...] = ()
-    parameters: tuple[IntegerParameter, ...] = ()
+    parameters: tuple[IntegerParameter | ChoiceParameter, ...] = ()
+    environment_checks: tuple[str, ...] = ()
+    group: str = "formal"
+
+    @property
+    def key(self) -> str:
+        """UI identity; the subprocess protocol keeps the original skill id."""
+        return f"test/{self.id}" if self.group == "test" else self.id
 
 
 class TaskCatalog:
-    """Discover task metadata by executing, never importing, each task entry."""
+    """Discover task metadata without executing or importing task code."""
 
     def __init__(
         self,
         tasks_root: Path,
-        python_executable: Path,
-        describe_timeout_ms: int,
+        *,
+        test_tasks_root: Path | None = None,
     ) -> None:
         if not isinstance(tasks_root, Path):
             raise TypeError("tasks_root must be a pathlib.Path")
-        if not isinstance(python_executable, Path):
-            raise TypeError("python_executable must be a pathlib.Path")
-        if (
-            isinstance(describe_timeout_ms, bool)
-            or not isinstance(describe_timeout_ms, int)
-            or describe_timeout_ms <= 0
-        ):
-            raise ValueError("describe_timeout_ms must be a positive integer")
-        executable = python_executable.resolve()
-        if not executable.is_file():
-            raise TaskCatalogError(f"Python executable does not exist: {executable}")
+        if test_tasks_root is not None and not isinstance(test_tasks_root, Path):
+            raise TypeError("test_tasks_root must be a pathlib.Path")
         self._tasks_root = tasks_root.resolve()
-        self._python_executable = executable
-        self._describe_timeout_seconds = describe_timeout_ms / 1000.0
+        self._test_tasks_root = test_tasks_root.resolve() if test_tasks_root is not None else None
+        if self._test_tasks_root == self._tasks_root:
+            raise ValueError("正式与测试技能目录不能相同")
         self._tasks: tuple[TaskDescriptor, ...] = ()
         self._by_id: dict[str, TaskDescriptor] = {}
         self._loaded_signature: TaskSignature = ()
@@ -67,11 +65,14 @@ class TaskCatalog:
         scripts, signature = self._scan_task_scripts()
         descriptors: list[TaskDescriptor] = []
         by_id: dict[str, TaskDescriptor] = {}
-        for task_id, script_path in scripts:
-            descriptor = self._describe_task(task_id, script_path)
-            if descriptor.id in by_id:
-                raise TaskCatalogError(f"duplicate task id: {descriptor.id}")
-            by_id[descriptor.id] = descriptor
+        for task_key, script_path in scripts:
+            group = "test" if task_key.startswith("test/") else "formal"
+            task_id = task_key.removeprefix("test/") if group == "test" else task_key
+            descriptor = _parse_descriptor(task_id, script_path, read_skill_manifest(script_path))
+            descriptor = replace(descriptor, group=group)
+            if descriptor.key in by_id:
+                raise TaskCatalogError(f"duplicate task id: {descriptor.key}")
+            by_id[descriptor.key] = descriptor
             descriptors.append(descriptor)
         snapshot = tuple(descriptors)
         self._tasks = snapshot
@@ -81,6 +82,24 @@ class TaskCatalog:
 
     def tasks(self) -> tuple[TaskDescriptor, ...]:
         return self._tasks
+
+    def record_move(self, task_key: str, script_path: Path, group: str) -> None:
+        """Update a successfully moved skill without executing its entry again."""
+        if group not in {'formal', 'test'}:
+            raise ValueError('未知技能分组')
+        task = replace(self.get(task_key), script_path=script_path, group=group)
+        signatures = {key: stamp for key, *stamp in self._loaded_signature}
+        signatures[task.key] = signatures[task_key]
+        by_id = {key: value for key, value in self._by_id.items() if key != task_key}
+        by_id[task.key] = task
+        snapshot = tuple(sorted(by_id.values(), key=lambda item: (
+            item.group == 'test',
+            item.script_path.name if item.script_path.suffix.lower() == '.exe' else item.script_path.parent.name,
+        )))
+        self._tasks = snapshot
+        self._by_id = by_id
+        # Keep other entries' signatures so external changes remain detectable.
+        self._loaded_signature = tuple((item.key, *signatures[item.key]) for item in snapshot)
 
     def get(self, task_id: str) -> TaskDescriptor:
         if not isinstance(task_id, str) or not task_id:
@@ -101,7 +120,15 @@ class TaskCatalog:
     def _scan_task_scripts(
         self,
     ) -> tuple[tuple[tuple[str, Path], ...], TaskSignature]:
-        root = self._tasks_root
+        scripts, signature = self._scan_root(self._tasks_root)
+        if self._test_tasks_root is not None:
+            test_scripts, test_signature = self._scan_root(self._test_tasks_root)
+            scripts += tuple((f"test/{task_id}", path) for task_id, path in test_scripts)
+            signature += tuple((f"test/{task_id}", *stamp)
+                               for task_id, *stamp in test_signature)
+        return scripts, signature
+
+    def _scan_root(self, root: Path) -> tuple[tuple[tuple[str, Path], ...], TaskSignature]:
         try:
             root_stat = root.stat()
         except FileNotFoundError:
@@ -117,7 +144,7 @@ class TaskCatalog:
             raise TaskCatalogError(f"cannot read tasks root {root}: {error}") from error
 
         scripts: list[tuple[str, Path]] = []
-        signature: list[tuple[str, int, int]] = []
+        signature: list[tuple[str, int, int, int, int]] = []
         seen_directory_ids: set[str] = set()
         for entry in directory_entries:
             if entry.is_dir(follow_symlinks=True):
@@ -136,68 +163,47 @@ class TaskCatalog:
             try:
                 stat = script_path.stat()
             except FileNotFoundError:
+                if skill_manifest_path(script_path).exists():
+                    raise TaskCatalogError(f"技能清单缺少对应入口：{script_path}")
                 continue
             except OSError as error:
                 raise TaskCatalogError(f"cannot inspect task script {script_path}: {error}") from error
             if not stat_module.S_ISREG(stat.st_mode):
                 raise TaskCatalogError(f"task entry is not a regular file: {script_path}")
+            manifest = skill_manifest_path(script_path)
+            try:
+                metadata_stat = manifest.stat()
+            except OSError as error:
+                raise TaskCatalogError(f"无法读取技能清单 {manifest}：{error}") from error
+            if not stat_module.S_ISREG(metadata_stat.st_mode):
+                raise TaskCatalogError(f"技能清单不是普通文件：{manifest}")
             scripts.append((task_id, script_path))
-            signature.append((task_id, stat.st_mtime_ns, stat.st_size))
+            signature.append((task_id, metadata_stat.st_mtime_ns, metadata_stat.st_size,
+                              stat.st_mtime_ns, stat.st_size))
         return tuple(scripts), tuple(signature)
 
-    def _describe_task(self, directory_id: str, script_path: Path) -> TaskDescriptor:
-        try:
-            environment = os.environ.copy()
-            environment["PYTHONUTF8"] = "1"
-            environment["PYTHONIOENCODING"] = "utf-8"
-            result = subprocess.run(
-                ([str(script_path), "--describe"] if script_path.suffix.lower() == ".exe"
-                 else [str(self._python_executable), str(script_path), "--describe"]),
-                cwd=str(script_path.parent),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=environment,
-                timeout=self._describe_timeout_seconds,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except subprocess.TimeoutExpired as error:
-            raise TaskCatalogError(
-                f"task {directory_id!r} description timed out after "
-                f"{self._describe_timeout_seconds * 1000:g} ms"
-            ) from error
-        except OSError as error:
-            raise TaskCatalogError(
-                f"cannot start task {directory_id!r} description: {error}"
-            ) from error
-        if result.returncode != 0:
-            stderr = _decode_diagnostic(result.stderr)
-            detail = f": {stderr}" if stderr else ""
-            raise TaskCatalogError(
-                f"task {directory_id!r} description exited with code "
-                f"{result.returncode}{detail}"
-            )
-        try:
-            stdout = result.stdout.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as error:
-            raise TaskCatalogError(
-                f"task {directory_id!r} description stdout is not valid UTF-8"
-            ) from error
-        stripped = stdout.strip()
-        if not stripped:
-            raise TaskCatalogError(f"task {directory_id!r} description stdout is empty")
-        try:
-            payload = json.loads(
-                stripped,
-                parse_constant=_reject_json_constant,
-                object_pairs_hook=_strict_json_object,
-            )
-        except (json.JSONDecodeError, TaskCatalogError) as error:
-            raise TaskCatalogError(
-                f"task {directory_id!r} description stdout must contain only one JSON object: {error}"
-            ) from error
-        return _parse_descriptor(directory_id, script_path, payload)
+
+def skill_manifest_path(script_path: Path) -> Path:
+    """Keep legacy standalone executables' manifests beside their entry files."""
+    return (script_path.with_suffix('.skill.json') if script_path.suffix.lower() == '.exe'
+            else script_path.with_name('skill.json'))
+
+
+def read_skill_manifest(script_path: Path) -> dict:
+    """Read the shared metadata contract used by discovery and the task SDK."""
+    script_path = Path(script_path).resolve()
+    manifest = skill_manifest_path(script_path)
+    try:
+        payload = json.loads(manifest.read_text(encoding='utf-8'),
+                             parse_constant=_reject_json_constant,
+                             object_pairs_hook=_strict_json_object)
+    except (OSError, UnicodeError, ValueError, TaskCatalogError) as error:
+        raise TaskCatalogError(f"无法读取技能清单 {manifest}：{error}") from error
+    task_id = (script_path.stem.removeprefix('task-') if script_path.suffix.lower() == '.exe'
+               else script_path.parent.name)
+    _parse_descriptor(task_id, script_path, payload)
+    # Older skills still read skill['name']; both runtime keys use the directory.
+    return {**payload, 'id': task_id, 'name': task_id}
 
 
 def _parse_descriptor(
@@ -222,20 +228,16 @@ def _parse_descriptor(
             f"task {directory_id!r} protocol_version must be {PROTOCOL_VERSION}"
         )
     task_id = payload["id"]
-    if not isinstance(task_id, str) or not task_id.strip():
+    if not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip():
         raise TaskCatalogError(f"task {directory_id!r} id must be non-empty text")
-    if task_id != directory_id:
-        raise TaskCatalogError(
-            f"task id {task_id!r} does not match directory name {directory_id!r}"
-        )
-    name = payload["name"]
-    if not isinstance(name, str) or not name.strip():
+    name = payload.get("name", task_id)
+    if not isinstance(name, str) or not name.strip() or name != name.strip():
         raise TaskCatalogError(f"task {directory_id!r} name must be non-empty text")
     description = payload.get("description", "")
     if not isinstance(description, str):
         raise TaskCatalogError(f"task {directory_id!r} description must be text")
     presentation = payload.get("presentation", "persistent")
-    if presentation not in _PRESENTATION_MODES:
+    if not isinstance(presentation, str) or presentation not in _PRESENTATION_MODES:
         raise TaskCatalogError(
             f"task {directory_id!r} presentation must be one of: "
             f"{sorted(_PRESENTATION_MODES)}"
@@ -249,11 +251,12 @@ def _parse_descriptor(
         parameters = parse_parameters(payload.get("parameters", []))
     except ValueError as error:
         raise TaskCatalogError(f"task {directory_id!r}: {error}") from error
-    return TaskDescriptor(task_id, name, description, script_path, presentation, tuple(debug_raw), parameters)
-
-
-def _decode_diagnostic(data: bytes) -> str:
-    return data.decode("utf-8", errors="replace").strip()
+    checks = payload.get("environment_checks", [])
+    if (not isinstance(checks, list)
+            or any(not isinstance(name, str) or not name.strip() for name in checks)
+            or len(set(checks)) != len(checks)):
+        raise TaskCatalogError(f"task {directory_id!r} environment_checks must be unique non-empty names")
+    return TaskDescriptor(directory_id, directory_id, description, script_path, presentation, tuple(debug_raw), parameters, tuple(checks))
 
 
 def _reject_json_constant(value: str) -> None:
@@ -269,4 +272,5 @@ def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-__all__ = ["TaskCatalog", "TaskCatalogError", "TaskDescriptor", "TaskSignature"]
+__all__ = ["TaskCatalog", "TaskCatalogError", "TaskDescriptor", "TaskSignature",
+           "read_skill_manifest", "skill_manifest_path"]

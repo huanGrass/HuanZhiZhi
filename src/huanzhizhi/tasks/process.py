@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from PySide6 import QtCore
+from huanzhizhi.python_runtime import python_executable as bundled_python
 
 from huanzhizhi.tasks.protocol import (
     FinishedEvent,
+    PauseStateEvent,
     ProtocolError,
-    TaskEvent,
     encode_start_message,
     encode_step_message,
     encode_stop_message,
+    encode_pause_message,
+    encode_parameter_update,
+    encode_input_result,
+    encode_pet_result,
     parse_event_line,
     validate_options,
 )
@@ -22,16 +26,19 @@ from huanzhizhi.tasks.protocol import (
 class TaskProcessManager(QtCore.QObject):
     event_received = QtCore.Signal(object)
     state_changed = QtCore.Signal(str)
+    pause_state_changed = QtCore.Signal(str)
     error = QtCore.Signal(str)
 
     def __init__(
         self,
         parent: QtCore.QObject | None = None,
         *,
+        python_executable: Path | None = None,
         terminate_timeout_ms: int = 1_500,
         kill_timeout_ms: int = 1_000,
     ) -> None:
         super().__init__(parent)
+        self._python_executable = python_executable or bundled_python()
         if (
             isinstance(terminate_timeout_ms, bool)
             or not isinstance(terminate_timeout_ms, int)
@@ -44,6 +51,7 @@ class TaskProcessManager(QtCore.QObject):
         self._terminate_timeout_ms = int(terminate_timeout_ms)
         self._kill_timeout_ms = int(kill_timeout_ms)
         self._state = "idle"
+        self._pause_state = 'unavailable'
         self._process: QtCore.QProcess | None = None
         self._task_id: str | None = None
         self._start_message = b""
@@ -70,14 +78,29 @@ class TaskProcessManager(QtCore.QObject):
         return self._task_id
 
     @property
+    def pause_state(self) -> str:
+        return self._pause_state
+
+    def set_paused(self, paused: bool) -> None:
+        message = encode_pause_message(paused)
+        expected = 'running' if paused else 'paused'
+        if self._state != 'running' or self._received_finished or self._pause_state != expected:
+            raise RuntimeError('任务当前不能暂停或继续')
+        self._write_message(message)
+        self._set_pause_state('pausing' if paused else 'resuming')
+
+    @property
     def stderr_text(self) -> str:
         return bytes(self._stderr_buffer).decode("utf-8", errors="replace")
 
-    def start(self, task_id: str, script_path: Path, options: dict | None = None) -> None:
+    def start(self, task_id: str, script_path: Path, options: dict | None = None,
+              *, input_mode: str = 'background') -> None:
         if self._state != "idle" or self._process is not None:
             raise RuntimeError("已有任务正在运行")
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id 必须是非空字符串")
+        if not isinstance(input_mode, str) or input_mode not in {'background', 'foreground'}:
+            raise ValueError('input_mode 必须是 background 或 foreground')
         path = Path(script_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"任务脚本不存在：{path}")
@@ -87,12 +110,15 @@ class TaskProcessManager(QtCore.QObject):
         self._start_message = encode_start_message(self._task_id, validated_options)
         process = QtCore.QProcess(self)
         compiled = path.suffix.lower() == ".exe"
-        process.setProgram(str(path) if compiled else sys.executable)
-        process.setArguments(["--run"] if compiled else [str(path), "--run"])
+        process.setProgram(str(path) if compiled else str(self._python_executable))
+        process.setArguments(["--run"] if compiled else [
+            "-I", "-X", "utf8", "-u", "-m", "huanzhizhi.script_runner", str(path), "--run",
+        ])
         process.setWorkingDirectory(str(path.parent))
         environment = QtCore.QProcessEnvironment.systemEnvironment()
         environment.insert("PYTHONUNBUFFERED", "1")
         environment.insert("PYTHONIOENCODING", "utf-8")
+        environment.insert('HUANZHIZHI_INPUT_MODE', input_mode)
         process.setProcessEnvironment(environment)
         process.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.SeparateChannels)
         process.started.connect(self._handle_started)
@@ -124,6 +150,21 @@ class TaskProcessManager(QtCore.QObject):
         if self._process is None or self._process.state() != QtCore.QProcess.ProcessState.Running:
             raise RuntimeError("任务进程尚未运行，无法执行下一步")
         self._write_message(encode_step_message())
+
+    def update_parameters(self, request_id: int, values: dict) -> None:
+        if self._state != "running" or self._received_finished:
+            raise RuntimeError("任务当前不能调整运行参数")
+        self._write_message(encode_parameter_update(request_id, values))
+
+    def send_input_result(self, request_id: str, error: str | None = None) -> None:
+        if self._received_finished:
+            raise RuntimeError('任务已结束，无法发送输入结果')
+        self._write_message(encode_input_result(request_id, error))
+
+    def send_pet_result(self, lease: str, geometry: dict | None, error: str | None = None) -> None:
+        if self._received_finished:
+            raise RuntimeError('任务已结束，无法发送桌宠接管结果')
+        self._write_message(encode_pet_result(lease, geometry, error))
 
     def close(self) -> None:
         process = self._process
@@ -194,6 +235,13 @@ class TaskProcessManager(QtCore.QObject):
                 return
             if isinstance(event, FinishedEvent):
                 self._received_finished = True
+                self._set_pause_state('unavailable')
+            elif isinstance(event, PauseStateEvent) and self._state == 'running':
+                expected = 'pausing' if event.paused else 'resuming'
+                if self._pause_state != expected:
+                    self._fail_protocol('暂停确认与当前控制请求不匹配')
+                    return
+                self._set_pause_state('paused' if event.paused else 'running')
             self.event_received.emit(event)
 
     @QtCore.Slot(QtCore.QProcess.ProcessError)
@@ -296,6 +344,12 @@ class TaskProcessManager(QtCore.QObject):
             return
         self._state = state
         self.state_changed.emit(state)
+        self._set_pause_state('running' if state == 'running' else 'unavailable')
+
+    def _set_pause_state(self, state: str) -> None:
+        if state != self._pause_state:
+            self._pause_state = state
+            self.pause_state_changed.emit(state)
 
 
 __all__ = ("TaskProcessManager",)

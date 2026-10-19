@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from threading import Event, Lock
 from time import monotonic
 from typing import Protocol
@@ -32,12 +33,16 @@ class WgcWindowCapture:
         self._requested_box: tuple[int, int, int, int] | None = None
         self._frame_box: tuple[int, int, int, int] | None = None
         self._failure: BaseException | None = None
-        self._last_copy_at = 0.0
         self._ready = Event()
         self._lock = Lock()
 
     def capture_client(self, info: _WindowInfo, *, crop_left: int, crop_top: int,
-                       region: tuple[int, int, int, int] | None = None) -> Image.Image:
+                       region: tuple[int, int, int, int] | None = None,
+                       after: float | None = None) -> Image.Image:
+        """Read the latest frame, optionally waiting past a perf_counter timestamp."""
+        if after is not None and (isinstance(after, bool) or not isinstance(after, (int, float))
+                                  or not math.isfinite(after)):
+            raise WindowCaptureError('after must be a finite perf_counter timestamp')
         left, top, right, bottom = region if region is not None else (0, 0, info.width, info.height)
         if not (0 <= left < right <= info.width and 0 <= top < bottom <= info.height):
             raise WindowCaptureError('requested region is outside the client rectangle')
@@ -50,11 +55,12 @@ class WgcWindowCapture:
         deadline = monotonic()+2
         while True:
             if not self._ready.wait(max(0, deadline-monotonic())):
-                raise WindowCaptureError("WGC did not deliver the requested region within 2 seconds")
+                raise WindowCaptureError("WGC did not deliver the requested frame within 2 seconds")
             with self._lock:
                 if self._failure is not None:
                     raise WindowCaptureError(f"WGC capture failed: {self._failure}") from self._failure
-                if self._frame is not None and self._frame_box == box:
+                if (self._frame is not None and self._frame_box == box
+                        and (after is None or self._frame.info['capture_source_at'] > after)):
                     return self._frame.copy()
                 self._ready.clear()
 
@@ -72,21 +78,19 @@ class WgcWindowCapture:
         self._failure = None
         self._frame = None
         self._frame_box = None
-        self._last_copy_at = 0.0
         try:
             from windows_capture import Frame, InternalCaptureControl, WindowsCapture
 
             capture = WindowsCapture(
                 cursor_capture=False,
                 window_hwnd=hwnd,
+                minimum_update_interval=self._interval,
             )
 
             @capture.event
             def on_frame_arrived(frame: Frame, _control: InternalCaptureControl) -> None:
                 # The native mapped buffer expires after this callback, so retain an RGB copy.
                 now = monotonic()
-                if now - self._last_copy_at < self._interval / 1000:
-                    return
                 with self._lock:
                     box = self._requested_box
                 if box is None:
@@ -110,7 +114,6 @@ class WgcWindowCapture:
                     self._failure = None
                     self._frame = image
                     self._frame_box = box
-                    self._last_copy_at = now
                 self._ready.set()
 
             @capture.event

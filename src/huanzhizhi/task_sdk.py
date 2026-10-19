@@ -8,17 +8,127 @@ import os
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import BinaryIO
 
-from huanzhizhi.parameters import parse_parameters
+from huanzhizhi.parameters import parse_parameters, validate_values
+from huanzhizhi.tasks.catalog import read_skill_manifest
 
 
 PROTOCOL_VERSION = 1
-_VALID_MODES = {"--describe": "describe", "--run": "run"}
+_VALID_MODES = {"--describe": "describe", "--run": "run", "--check-environment": "check_environment"}
 _stdout_lock = threading.Lock()
 _describe_lock = threading.Lock()
 _description_emitted = False
+_active_session = None
+
+
+def _input_mode() -> str:
+    mode = os.environ.get('HUANZHIZHI_INPUT_MODE', 'background')
+    if mode not in {'background', 'foreground'}:
+        raise ValueError('HUANZHIZHI_INPUT_MODE 必须是 background 或 foreground')
+    return mode
+
+
+def _write_event_file(events: str | Path, payload: dict) -> None:
+    encoded = (json.dumps(payload, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8')
+    # Never recreate a channel removed when the host stops the turn.
+    descriptor = os.open(events, os.O_WRONLY | os.O_APPEND | getattr(os, 'O_BINARY', 0))
+    with os.fdopen(descriptor, 'wb', buffering=0) as stream:
+        stream.write(encoded)
+
+
+def _validated_input_request_id(value: object) -> str:
+    if (not isinstance(value, str) or len(value) != 32
+            or any(character not in '0123456789abcdef' for character in value)):
+        raise TaskSdkError('input request_id 必须是 32 位小写十六进制字符串')
+    return value
+
+
+def input_result_path(events: str | Path, request_id: str) -> Path:
+    """The host and child derive replies only from the existing event channel."""
+    return Path(str(events) + '.replies') / (_validated_input_request_id(request_id) + '.json')
+
+
+def _parse_input_result(message: dict) -> tuple[str, str | None]:
+    _require_exact_fields(message, {'protocol_version', 'type', 'request_id', 'error'}, 'input_result')
+    _require_version(message)
+    if message['type'] != 'input_result':
+        raise TaskSdkError('输入响应 type 必须是 input_result')
+    request_id = _validated_input_request_id(message['request_id'])
+    error = message['error']
+    if error is not None and not isinstance(error, str):
+        raise TaskSdkError('input_result.error 必须是字符串或 null')
+    return request_id, error
+
+
+def _request_foreground_input(window: dict, kind: str, x: int, y: int,
+                              end_x: int | None = None, end_y: int | None = None,
+                              duration: float = 0.0, *, timeout: float = 30.0) -> None:
+    """Wait for host-owned input; errors never fall back to child-side input."""
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError('输入等待超时必须是大于零的有限秒数')
+    if _active_session is not None and _active_session.stop_requested:
+        raise InterruptedError('已停止，未继续操作')
+    request = dict(protocol_version=PROTOCOL_VERSION, type='input_request',
+                   request_id=uuid.uuid4().hex, kind=kind, window=dict(window),
+                   x=x, y=y, end_x=end_x, end_y=end_y, duration=duration)
+    events = os.environ.get('HUANZHIZHI_CLICK_EVENTS')
+    if not events:
+        if _active_session is None:
+            raise RuntimeError('前台输入需要连接桌宠：请从任务或技能分析入口运行。')
+        _active_session._request_input(request, timeout)
+        return
+    reply = input_result_path(events, request['request_id'])
+    _write_event_file(events, request)
+    received = False
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if _active_session is not None and _active_session.stop_requested:
+                raise InterruptedError('已停止，已取消等待输入')
+            if not Path(events).is_file():
+                raise InterruptedError('输入通道已关闭，已取消等待输入')
+            try:
+                response = reply.read_bytes()
+            except FileNotFoundError:
+                response = None
+            if response is not None:
+                try:
+                    request_id, error = _parse_input_result(_parse_json_line(response, 'input_result'))
+                    if request_id != request['request_id']:
+                        raise TaskSdkError('输入响应 request_id 与请求不匹配')
+                except TaskSdkError as error:
+                    raise RuntimeError(f'非法输入响应：{error}') from error
+                received = True
+                if error is not None:
+                    raise RuntimeError(f'前台输入失败：{error}')
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError('等待前台输入完成超时')
+            time.sleep(.02)
+    finally:
+        if not received:
+            try:
+                _write_event_file(events, dict(protocol_version=PROTOCOL_VERSION, type='input_cancel',
+                                              request_id=request['request_id']))
+            except OSError:
+                pass  # Closing the channel already cancels its outstanding input.
+        reply.unlink(missing_ok=True)
+
+
+def _emit_click_point(x: int, y: int) -> None:
+    """Route desktop clicks to the task host, including AI development children."""
+    if _active_session is not None and _active_session.stop_requested:
+        raise InterruptedError('已停止，未继续点击')
+    events = os.environ.get('HUANZHIZHI_CLICK_EVENTS')
+    if events:
+        _write_event_file(events, dict(protocol_version=PROTOCOL_VERSION, type='point', x=x, y=y))
+    elif _active_session is not None:
+        _active_session.emit_point(x, y)
+    else:
+        raise RuntimeError('点击需要连接桌宠：请从任务或技能分析入口运行。')
 
 if os.name == "nt":
     import ctypes
@@ -41,65 +151,133 @@ class TaskSdkError(ValueError):
     """Internal strict-protocol validation error."""
 
 
-def describe(
-    task_id: str,
-    name: str,
-    description: str = "",
-    *,
-    presentation: str = "persistent",
-    debug_steps: tuple[str, ...] = (),
-    parameters: tuple[dict, ...] = (),
-) -> bool:
-    """Emit the sole description object in ``--describe`` mode.
+class ObservationPending(ValueError):
+    """A skill's read-only check found a state that may still settle."""
+
+
+def confirm_observation(session, observe, *, retries=3, interval=.2, timeout=None, records=None):
+    """Return a fresh validated observation, retrying only ObservationPending.
+
+    ``observe`` must reacquire state and check it against the same reference on
+    every call. Never put clicks, submissions or other target mutations in it.
+    ``retries`` counts additional checks; changing errors share the same limit.
+    ``timeout`` optionally limits elapsed time before another check starts; a
+    running observation must implement its own I/O timeout and cooperative stop.
+    Other exceptions propagate immediately. Waiting and successful observations
+    both honor cooperative stop. Optional records receive bounded attempt data.
+    """
+    if type(retries) is not int or retries < 0:
+        raise ValueError('复检次数必须是非负整数')
+    if type(interval) not in (int, float) or not math.isfinite(interval) or interval <= 0:
+        raise ValueError('复检间隔必须是大于零的有限秒数')
+    if timeout is not None and (
+            type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError('复检超时必须是大于零的有限秒数')
+    started = time.monotonic()
+    deadline = None if timeout is None else started + timeout
+    for attempt in range(retries + 1):
+        if session.stop_requested:
+            raise InterruptedError('用户已停止')
+        try:
+            result = observe()
+        except ObservationPending as error:
+            if session.stop_requested:
+                raise InterruptedError('用户已停止') from error
+            if records is not None:
+                records.append(dict(attempt=attempt + 1, elapsed=time.monotonic() - started, error=str(error)))
+            session.emit_log(f'状态确认 {attempt + 1}/{retries + 1}：{error}')
+            if attempt == retries:
+                raise
+            remaining = interval if deadline is None else deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            if session.wait_for_stop(min(interval, remaining)):
+                raise InterruptedError('用户已停止') from error
+            if deadline is not None and time.monotonic() >= deadline:
+                raise
+        else:
+            if session.stop_requested:
+                raise InterruptedError('用户已停止')
+            if records is not None:
+                records.append(dict(attempt=attempt + 1, elapsed=time.monotonic() - started, error=None))
+            if attempt:
+                session.emit_log(f'状态复检通过（第 {attempt + 1} 次检测）')
+            return result
+
+
+def load_skill(entry: str | Path | None = None) -> dict:
+    """Read skill.json beside the entry; metadata is never defined in Python."""
+    if getattr(sys, 'frozen', False):
+        entry = sys.executable
+    return read_skill_manifest(Path(entry or sys.argv[0]))
+
+
+def describe(entry: str | Path | None = None, *, environment_checks: dict | None = None) -> bool:
+    """Emit the manifest in ``--describe`` mode; discovery reads JSON directly.
 
     Returns ``False`` in ``--run`` mode so one task entry point can use::
 
-        if describe("demo", "Demo task"):
+        if describe(__file__):
             raise SystemExit(0)
-        session = TaskSession("demo")
+        session = TaskSession(__file__)
+
+    Optional ``environment_checks`` maps dependency names to read-only, no-argument
+    functions. Each returns a non-empty success description or raises an exception
+    explaining an unmet requirement. Checks run before ``--run`` and on explicit
+    ``--check-environment``. Names must exactly match skill.json's
+    ``environment_checks``. Import optional dependencies inside each check.
     """
 
-    task_id = _validated_identity(task_id, "task_id")
-    name = _validated_identity(name, "name")
-    if not isinstance(description, str):
-        _fatal("description 必须是字符串")
-    if presentation not in {"persistent", "launch_only"}:
-        _fatal("presentation 必须是 persistent 或 launch_only")
-    if not isinstance(debug_steps, tuple) or any(
-        not isinstance(step, str) or not step.strip() for step in debug_steps
+    metadata = load_skill(entry)
+    checks = {} if environment_checks is None else environment_checks
+    if not isinstance(checks, dict) or any(
+        not isinstance(label, str) or not label.strip() or not callable(check)
+        for label, check in checks.items()
     ):
-        _fatal("debug_steps 必须是非空字符串元组")
-    try:
-        parse_parameters(list(parameters))
-    except ValueError as error:
-        _fatal(str(error))
-    if _entry_mode() == "run":
+        _fatal("environment_checks 必须是依赖名称到检查函数的字典")
+    if set(checks) != set(metadata.get('environment_checks', [])):
+        _fatal("环境检查函数必须与 skill.json 的 environment_checks 完全一致")
+    mode = _entry_mode()
+    if mode in {"run", "check_environment"}:
+        failures = []
+        for label in metadata.get('environment_checks', []):
+            try:
+                detail = checks[label]()
+                if not isinstance(detail, str) or not detail.strip():
+                    raise ValueError("检查函数必须返回非空的通过说明，未满足要求时抛出异常")
+                satisfied = True
+            except Exception as error:
+                satisfied = False
+                detail = str(error) or type(error).__name__
+                failures.append(f"{label}：{detail}")
+            if mode == "check_environment":
+                _emit_json({"name": label, "satisfied": satisfied, "detail": detail})
+        if mode == "check_environment":
+            return True
+        if failures:
+            _fatal("技能依赖环境不满足：" + "；".join(failures))
         return False
     global _description_emitted
     with _describe_lock:
         if _description_emitted:
             _fatal("--describe 模式只能输出一个描述对象")
         _description_emitted = True
-        payload = {
-                "protocol_version": PROTOCOL_VERSION,
-                "id": task_id,
-                "name": name,
-                "description": description,
-                "presentation": presentation,
-            }
-        if parameters:
-            payload["parameters"] = list(parameters)
-        if debug_steps:
-            payload["debug_steps"] = list(debug_steps)
-        _emit_json(payload)
+        _emit_json(metadata)
     return True
 
 
 class TaskSession:
-    """Validated host session with asynchronous cooperative-stop reception."""
+    """Validated host session with asynchronous cooperative-stop reception.
 
-    def __init__(self, task_id: str) -> None:
-        self.task_id = _validated_identity(task_id, "task_id")
+    Parameter definitions and defaults come exclusively from skill.json.
+    Only definitions with ``runtime=True`` are writable;
+    the task must call ``apply_parameter_updates`` at safe action boundaries.
+    """
+
+    def __init__(self, entry: str | Path | None = None) -> None:
+        self.skill = load_skill(entry)
+        self.task_id = self.skill['id']
+        _input_mode()
         if _entry_mode() != "run":
             _fatal("TaskSession 只能在 --run 模式创建")
         self._reader = _InputReader(sys.stdin.buffer)
@@ -119,10 +297,27 @@ class TaskSession:
             _fatal(f"非法 start 消息：{error}")
 
         self._options = start["options"]
+        parameters = parse_parameters(self.skill.get('parameters', []))
+        self._runtime_parameters = tuple(item for item in parameters if item.runtime)
+        self._options.update(validate_values(parameters, {
+            item.key: self._options[item.key] for item in parameters if item.key in self._options
+        }))
+        self._pending_parameters: tuple[int, dict] | None = None
+        self._last_parameter_request = 0
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
         self._step_event = threading.Event()
         self._state_lock = threading.Lock()
         self._input_error: str | None = None
+        self._pending_input_id: str | None = None
+        self._input_result_ready = threading.Event()
+        self._input_result_error: str | None = None
+        self._cancelled_input_ids: set[str] = set()
+        self._pet_lease: str | None = None
+        self._pet_result_ready = threading.Event()
+        self._pet_result: dict | None = None
+        self._cancelled_pet_leases: set[str] = set()
+        self._pause_polled = False
         self._finished = False
         self._input_thread = threading.Thread(
             target=self._read_control_messages,
@@ -130,20 +325,88 @@ class TaskSession:
             daemon=True,
         )
         self._input_thread.start()
+        global _active_session
+        _active_session = self
 
     @property
     def options(self) -> dict[str, object]:
-        return dict(self._options)
+        with self._state_lock:
+            return dict(self._options)
+
+    def apply_parameter_updates(self) -> dict[str, object]:
+        """Apply queued runtime values at a task-chosen safe point, then acknowledge.
+
+        Call from the task work thread before the next action and during idle
+        waits. Receiving a control message alone never mutates the task options.
+        """
+        self._ensure_input_valid()
+        with self._state_lock:
+            pending = self._pending_parameters
+            if self._stop_event.is_set() or self._finished:
+                return dict(self._options)
+            self._pending_parameters = None
+            if pending is not None:
+                self._options.update(pending[1])
+            options = dict(self._options)
+        if pending is not None:
+            self._emit_event("parameters_applied", request_id=pending[0], values=pending[1])
+        return options
 
     @property
     def stop_requested(self) -> bool:
         return self._stop_event.is_set()
 
+    @property
+    def pause_requested(self) -> bool:
+        return self._pause_event.is_set()
+
+    def wait_if_paused(self, *, cancel_event: threading.Event | None = None) -> bool:
+        """Pause at an action boundary, keeping parameters and stop responsive.
+
+        Call from the task work thread before acquiring the next observation,
+        after confirming the previous action. True means a pause occurred:
+        discard cached observations and revalidate before any further input.
+        Long computations may finish before reaching this boundary; the host
+        displays 'pausing' until this method acknowledges it.
+        Workers may pass their shutdown event so closing a task-owned window
+        also exits the pause wait without blocking its GUI event loop.
+        """
+        self._ensure_input_valid()
+        if not self._pause_event.is_set() or self._stop_event.is_set():
+            return False
+        self._emit_event('pause_state', paused=True)
+        while self._pause_event.is_set() and not self._stop_event.is_set():
+            if cancel_event is not None and cancel_event.is_set():
+                return True
+            self.apply_parameter_updates()
+            self._stop_event.wait(.05)
+        self._ensure_input_valid()
+        if not self._stop_event.is_set() and not (cancel_event is not None and cancel_event.is_set()):
+            self.apply_parameter_updates()
+            self._emit_event('pause_state', paused=False)
+        return True
+
     def wait_for_stop(self, timeout: float | None = None) -> bool:
         return self._stop_event.wait(timeout)
 
+    def poll_pause(self) -> bool:
+        """Nonblocking pause boundary for GUI loops (instead of wait_if_paused).
+
+        Call before each simulation/work tick; skip work while True. GUI event
+        processing and stop handling must continue while paused.
+        """
+        self._ensure_input_valid()
+        paused = self.pause_requested
+        if not self.stop_requested and paused != self._pause_polled:
+            self._emit_event('pause_state', paused=paused)
+            self._pause_polled = paused
+        return paused
+
     def wait_for_step(self) -> bool:
         while not self._stop_event.is_set():
+            self.wait_if_paused()
+            if self._stop_event.is_set():
+                return False
             if self._step_event.wait(0.05):
                 self._step_event.clear()
                 return True
@@ -176,6 +439,101 @@ class TaskSession:
         if isinstance(x, bool) or not isinstance(x, int) or isinstance(y, bool) or not isinstance(y, int):
             _fatal("point.x 和 point.y 必须是整数")
         self._emit_event("point", x=x, y=y)
+
+    def acquire_pet(self, *, timeout: float = 5.0) -> dict:
+        """Temporarily own the real pet. Geometry uses Qt global logical pixels.
+
+        Pose bounds/contact offsets are relative to the update_pet pivot.
+        Call release_pet in finally. Host exit/stop also revokes ownership.
+        """
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError('接管等待时间必须大于零')
+        if self._pet_lease is not None:
+            raise RuntimeError('已经申请了桌宠接管')
+        if self.stop_requested:
+            raise InterruptedError('技能已停止')
+        self._pet_lease = uuid.uuid4().hex
+        self._pet_result = None
+        self._pet_result_ready.clear()
+        try:
+            self._emit_event('pet_acquire', lease=self._pet_lease)
+            deadline = time.monotonic() + timeout
+            while not self._pet_result_ready.wait(.02):
+                self._ensure_input_valid()
+                if self.stop_requested:
+                    raise InterruptedError('接管已取消')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('桌宠宿主未确认接管')
+            if self.stop_requested:
+                raise InterruptedError('接管已取消')
+            if self._pet_result['error'] is not None:
+                raise RuntimeError(self._pet_result['error'])
+            return self._pet_result['geometry']
+        except BaseException:
+            self.release_pet()
+            raise
+
+    def update_pet(self, x: float, y: float, *, facing: str = 'left', pose: str = 'idle') -> None:
+        """Publish the latest visual state; never moves or clicks the cursor."""
+        from huanzhizhi.tasks.protocol import validate_pet_state
+        validate_pet_state(x, y, facing, pose)
+        if self._pet_lease is None or not self._pet_result_ready.is_set():
+            raise RuntimeError('请先接管桌宠')
+        if self.stop_requested:
+            raise InterruptedError('技能已停止')
+        self._emit_event('pet_update', lease=self._pet_lease, x=x, y=y, facing=facing, pose=pose)
+
+    def release_pet(self) -> None:
+        """Idempotent release; the host restores the saved resting position."""
+        lease = self._pet_lease
+        if lease is not None:
+            with self._state_lock:
+                if not self._pet_result_ready.is_set():
+                    self._cancelled_pet_leases.add(lease)
+                self._pet_lease = None
+            self._emit_event('pet_release', lease=lease)
+
+    def _request_input(self, request: dict, timeout: float) -> None:
+        self._ensure_input_valid()
+        with self._state_lock:
+            if self._pending_input_id is not None:
+                raise RuntimeError('上一项前台输入尚未完成')
+            if self._stop_event.is_set():
+                raise InterruptedError('已停止，未继续操作')
+            self._pending_input_id = request['request_id']
+            self._input_result_error = None
+            self._input_result_ready.clear()
+        sent = received = False
+        try:
+            self._emit_event('input_request', **{
+                key: value for key, value in request.items() if key not in {'protocol_version', 'type'}
+            })
+            sent = True
+            deadline = time.monotonic() + timeout
+            while True:
+                self._ensure_input_valid()
+                if self._stop_event.is_set():
+                    raise InterruptedError('已停止，已取消等待输入')
+                if self._input_result_ready.wait(.02):
+                    received = True
+                    with self._state_lock:
+                        error = self._input_result_error
+                    if error is not None:
+                        raise RuntimeError(f'前台输入失败：{error}')
+                    return
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('等待前台输入完成超时')
+        finally:
+            with self._state_lock:
+                if sent and not received:
+                    self._cancelled_input_ids.add(request['request_id'])
+                self._pending_input_id = None
+            if sent and not received:
+                try:
+                    _emit_json(dict(protocol_version=PROTOCOL_VERSION, type='input_cancel',
+                                    request_id=request['request_id']))
+                except OSError:
+                    pass
 
     def emit_hint(self, points: list[tuple[int, int]], kind: str, label: str) -> None:
         """Request a visual-only hint in physical screen coordinates."""
@@ -273,14 +631,62 @@ class TaskSession:
                 return
             try:
                 message = _parse_json_line(line, "control")
-                _require_exact_fields(message, {"protocol_version", "type"}, "control")
                 _require_version(message)
+                if message.get('type') == 'pet_result':
+                    _require_exact_fields(message, {'protocol_version', 'type', 'lease', 'geometry', 'error'}, 'pet_result')
+                    lease = _validated_input_request_id(message['lease'])
+                    if message['error'] is not None and not isinstance(message['error'], str):
+                        raise TaskSdkError('桌宠接管错误必须是字符串或 null')
+                    if message['error'] is None and not isinstance(message['geometry'], dict):
+                        raise TaskSdkError('桌宠接管结果缺少几何信息')
+                    with self._state_lock:
+                        if lease in self._cancelled_pet_leases:
+                            self._cancelled_pet_leases.remove(lease)
+                            continue
+                        if lease != self._pet_lease or self._pet_result_ready.is_set():
+                            raise TaskSdkError('桌宠接管响应不匹配或重复')
+                        self._pet_result = message
+                        self._pet_result_ready.set()
+                    continue
+                if message.get('type') == 'input_result':
+                    request_id, error = _parse_input_result(message)
+                    with self._state_lock:
+                        if request_id in self._cancelled_input_ids:
+                            self._cancelled_input_ids.remove(request_id)
+                            continue
+                        if request_id != self._pending_input_id or self._input_result_ready.is_set():
+                            raise TaskSdkError('输入响应 request_id 与待执行请求不匹配或重复')
+                        self._input_result_error = error
+                        self._input_result_ready.set()
+                    continue
+                if message.get("type") == "update_parameters":
+                    _require_exact_fields(message, {"protocol_version", "type", "request_id", "values"}, "control")
+                    request_id, values = message["request_id"], message["values"]
+                    if type(request_id) is not int or request_id <= self._last_parameter_request:
+                        raise TaskSdkError("参数更新 request_id 必须是递增正整数")
+                    if not isinstance(values, dict) or not values:
+                        raise TaskSdkError("参数更新 values 必须是非空对象")
+                    try:
+                        values = validate_values(tuple(item for item in self._runtime_parameters if item.key in values), values)
+                    except ValueError as error:
+                        raise TaskSdkError(str(error)) from error
+                    with self._state_lock:
+                        if self._pending_parameters is not None:
+                            raise TaskSdkError("上一项参数更新尚未应用")
+                        self._pending_parameters = (request_id, values)
+                        self._last_parameter_request = request_id
+                    continue
+                _require_exact_fields(message, {"protocol_version", "type"}, "control")
                 if message["type"] == "stop":
                     self._stop_event.set()
+                elif message['type'] == 'pause':
+                    self._pause_event.set()
+                elif message['type'] == 'resume':
+                    self._pause_event.clear()
                 elif message["type"] == "step":
                     self._step_event.set()
                 else:
-                    raise TaskSdkError("控制消息 type 必须是 stop 或 step")
+                    raise TaskSdkError("控制消息 type 必须是 stop、pause、resume、step、update_parameters、input_result 或 pet_result")
             except TaskSdkError as error:
                 self._record_input_error(f"非法 stop 消息：{error}")
                 return
@@ -294,8 +700,8 @@ class TaskSession:
         self._stop_event.set()
 
 
-def run_session(task_id: str) -> TaskSession:
-    return TaskSession(task_id)
+def run_session(entry: str | Path | None = None) -> TaskSession:
+    return TaskSession(entry)
 
 
 class _InputReader:
@@ -335,14 +741,8 @@ class _InputReader:
 def _entry_mode() -> str:
     arguments = sys.argv[1:]
     if len(arguments) != 1 or arguments[0] not in _VALID_MODES:
-        _fatal("入口参数必须且只能是 --describe 或 --run")
+        _fatal("入口参数必须且只能是 --describe、--run 或 --check-environment")
     return _VALID_MODES[arguments[0]]
-
-
-def _validated_identity(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
-        _fatal(f"{field} 必须是无首尾空白的非空字符串")
-    return value
 
 
 def _required_string(value: object, field: str) -> str:
@@ -494,5 +894,7 @@ __all__ = (
     "TaskSdkError",
     "TaskSession",
     "describe",
+    "load_skill",
+    "input_result_path",
     "run_session",
 )
