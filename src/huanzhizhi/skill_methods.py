@@ -107,7 +107,7 @@ def _evaluate(source, cases, directory, stopped):
         raise ValueError('自定义方法输入过大，请先缩小识别区域')
     code = ('import json\nfrom huanzhizhi.skill_methods import _worker\n'
             f'_worker({source!r}, json.loads({payload!r}))\n')
-    result = run_code(code, runs_dir=directory / 'method-runs', timeout=10,
+    result = run_code(code, runs_dir=directory / '.runtime' / 'runs' / 'method-runs', timeout=10,
                       stop_event=SimpleNamespace(is_set=stopped))
     if result.stopped:
         raise InterruptedError('自定义方法已停止')

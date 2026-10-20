@@ -117,22 +117,26 @@ def require_free_model(path, model, check_stop=lambda: None):
         raise SettingsError('所选模型已不在当前免费目录，请重新检测并选择免费模型；不会切换到付费模型。')
 
 
-def build_command(path, options, thread_id=None, *, probe=False):
+def build_command(path, options, thread_id=None, *, probe=False, observation_image=None):
     validate_options(options)
     command = [path, 'run', '--standalone', '--format', 'json', '--model', options['model'],
                '--agent', 'build', '--title', '之之技能开发']
-    if thread_id:
+    if observation_image:
+        command += ['--file', str(observation_image.resolve())]
+    if thread_id and not observation_image:
         command += ['--session', thread_id]
     if not probe:
         command.append('--auto')
     return command
 
 
-def environment():
+def environment(*, observe_only=False):
     # Session-local overlay only: never overwrite the user's OpenCode configuration.
     # Development uses --auto; OpenCode still honors explicit user denials.
     permissions = [{'action': 'subagent', 'resource': '*', 'effect': 'deny'},
                    {'action': 'question', 'resource': '*', 'effect': 'deny'}]
+    if observe_only:
+        permissions.append({'action': '*', 'resource': '*', 'effect': 'deny'})
     try:
         config = json.loads(os.environ.get('OPENCODE_CONFIG_CONTENT', '{}'))
         if not isinstance(config, dict) or not isinstance(config.get('permissions', []), list):

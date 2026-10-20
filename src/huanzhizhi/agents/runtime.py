@@ -2,6 +2,7 @@
 import os
 import subprocess
 import threading
+import time
 
 from huanzhizhi.python_runtime import _stop_process
 from huanzhizhi.tasks.protocol import (
@@ -22,7 +23,8 @@ class AgentTaskError(RuntimeError):
         self.user_message = user_message
 
 
-def run_agent(worker, command, turn, *, stdout_name, consume=None, environment=None):
+def run_agent(worker, command, turn, *, stdout_name, consume=None, environment=None,
+              allow_input=True, timeout=None):
     """Run one child, drain its output, and stop the complete process tree."""
     clicks = turn / 'clicks.jsonl'
     clicks.touch()
@@ -33,6 +35,9 @@ def run_agent(worker, command, turn, *, stdout_name, consume=None, environment=N
     if input_mode not in ('background', 'foreground'):
         raise ValueError('未知鼠标操作模式')
     env['HUANZHIZHI_INPUT_MODE'] = input_mode
+    if not allow_input:
+        env.pop('HUANZHIZHI_CLICK_EVENTS', None)
+        env.pop('HUANZHIZHI_INPUT_MODE', None)
     channel_open = True
     pending = set()
     seen = set()
@@ -63,6 +68,9 @@ def run_agent(worker, command, turn, *, stdout_name, consume=None, environment=N
                 if not line.endswith(b'\n'):
                     click_reader.seek(position)
                     break
+                if not allow_input:
+                    raise AgentTaskError('窗口观察未完成，可以手动输入目标继续。',
+                                         '观察阶段收到不允许的输入事件')
                 event = parse_event_line(line)
                 if isinstance(event, InputCancelEvent):
                     with channel_lock:
@@ -92,8 +100,12 @@ def run_agent(worker, command, turn, *, stdout_name, consume=None, environment=N
             process = subprocess.Popen(command, cwd=worker.directory, stdin=stdin,
                                        stdout=stdout, stderr=stderr, env=env,
                                        creationflags=subprocess.CREATE_NO_WINDOW)
+            deadline = time.monotonic() + timeout if timeout is not None else None
             while True:
                 worker.check_stop()
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise AgentTaskError('查看窗口超时，可以手动输入目标继续。',
+                                         f'观察超过 {timeout} 秒')
                 drain()
                 try:
                     code = process.wait(timeout=.2)

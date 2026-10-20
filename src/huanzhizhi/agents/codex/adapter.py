@@ -80,16 +80,22 @@ def model_catalog():
     return result
 
 
-def build_command(executable, options, thread_id, answer, clicks, *, input_mode='background'):
+def build_command(executable, options, thread_id, answer, clicks, *, input_mode='background', observation_image=None):
     if input_mode not in ('background', 'foreground'):
         raise ValueError('未知鼠标操作模式')
-    command = [executable, 'exec', '--sandbox', 'danger-full-access',
+    command = [executable, 'exec', '--sandbox', 'read-only' if observation_image else 'danger-full-access',
                '-c', 'model_reasoning_effort=' + json.dumps(options['reasoning_effort']),
                '-c', 'approval_policy="never"',
-               '-c', 'web_search="disabled"', '-c', 'project_doc_max_bytes=0',
-               '-c', 'shell_environment_policy.set={HUANZHIZHI_CLICK_EVENTS=' + json.dumps(str(clicks.resolve()))
-               + ',HUANZHIZHI_INPUT_MODE=' + json.dumps(input_mode) + '}']
-    if thread_id:
+               '-c', 'web_search="disabled"', '-c', 'project_doc_max_bytes=0']
+    if observation_image:
+        command.extend(('--ephemeral', '--image', str(observation_image.resolve())))
+        for feature in ('shell_tool', 'unified_exec', 'code_mode', 'image_generation', 'skill_search'):
+            command.extend(('--disable', feature))
+    else:
+        command.extend(('-c', 'shell_environment_policy.set={HUANZHIZHI_CLICK_EVENTS='
+                        + json.dumps(str(clicks.resolve()))
+                        + ',HUANZHIZHI_INPUT_MODE=' + json.dumps(input_mode) + '}'))
+    if thread_id and not observation_image:
         command.extend(('resume', thread_id))
     command.extend(('--model', options['model'], '--ignore-user-config', '--skip-git-repo-check',
                     '--json', '--output-last-message', str(answer)))

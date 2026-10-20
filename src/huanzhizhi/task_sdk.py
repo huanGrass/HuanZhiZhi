@@ -212,6 +212,18 @@ def load_skill(entry: str | Path | None = None) -> dict:
     return read_skill_manifest(Path(entry or sys.argv[0]))
 
 
+def runtime_directory(entry: str | Path | None = None) -> Path:
+    """Locate local runtime data without creating directories or reading state.
+
+    Use runs/ for evidence, cache/ for disposable data and state/ for persistent
+    data. The host excludes the skill-root .runtime from distributable packages.
+    Standalone legacy executables share a parent, so each uses its own subfolder.
+    """
+    path = Path(sys.executable if getattr(sys, 'frozen', False) else entry or sys.argv[0]).resolve()
+    directory = path.parent / '.runtime'
+    return directory / path.stem if path.suffix.lower() == '.exe' else directory
+
+
 def describe(entry: str | Path | None = None, *, environment_checks: dict | None = None) -> bool:
     """Emit the manifest in ``--describe`` mode; discovery reads JSON directly.
 
@@ -277,6 +289,7 @@ class TaskSession:
     def __init__(self, entry: str | Path | None = None) -> None:
         self.skill = load_skill(entry)
         self.task_id = self.skill['id']
+        self.runtime_dir = runtime_directory(entry)
         _input_mode()
         if _entry_mode() != "run":
             _fatal("TaskSession 只能在 --run 模式创建")
@@ -895,6 +908,7 @@ __all__ = (
     "TaskSession",
     "describe",
     "load_skill",
+    "runtime_directory",
     "input_result_path",
     "run_session",
 )

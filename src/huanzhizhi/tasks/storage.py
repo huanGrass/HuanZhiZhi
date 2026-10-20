@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import shutil
 from pathlib import Path
 
 from PySide6 import QtCore
@@ -57,20 +58,30 @@ def synchronize_skill_names(tasks, settings) -> dict[str, str]:
     return renames
 
 
-def skill_files(directory: Path) -> dict[str, str]:
+def skill_files(directory: Path, *, include_runtime: bool = True) -> dict[str, str]:
     """Fingerprint contents without following links or runtime bytecode."""
     def paths():
         yield directory
         if directory.is_dir():
-            yield from directory.rglob('*')
+            for child in directory.iterdir():
+                yield child
+                if child.is_dir() and (include_runtime or child.name.casefold() != '.runtime'):
+                    yield from child.rglob('*')
         elif directory.suffix.lower() == '.exe':
             yield skill_manifest_path(directory)
+            runtime = directory.parent / '.runtime' / directory.stem
+            if include_runtime and runtime.exists():
+                yield runtime.parent
+                yield runtime
+                yield from runtime.rglob('*')
     base = directory if directory.is_dir() else directory.parent
     files = {}
     for path in paths():
         if path.is_symlink() or getattr(path.lstat(), 'st_file_attributes', 0) & 0x400:
             raise ValueError(f'技能目录包含链接，无法安全复制：{path}')
         relative = path.relative_to(base) if path != directory else Path(path.name)
+        if not include_runtime and relative.parts[0].casefold() == '.runtime':
+            continue
         if '__pycache__' in relative.parts or path.suffix in {'.pyc', '.pyo'}:
             continue
         if path.is_file():
@@ -78,10 +89,26 @@ def skill_files(directory: Path) -> dict[str, str]:
     return files
 
 
+def copy_skill_package(source: Path, destination: Path) -> None:
+    """Copy distributable files, leaving local runtime data in the source."""
+    skill_files(source, include_runtime=False)  # Reject links before copying.
+
+    def ignore(directory, names):
+        ignored = set(shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo')(directory, names))
+        if Path(directory) == source:
+            ignored.update(name for name in names if name.casefold() == '.runtime')
+        return ignored
+
+    shutil.copytree(source, destination, ignore=ignore)
+
+
 def _move_skill(source: Path, destination: Path) -> None:
     pairs = [(source, destination)]
     if source.is_file() and source.suffix.lower() == '.exe':
         pairs.append((skill_manifest_path(source), skill_manifest_path(destination)))
+        runtime = source.parent / '.runtime' / source.stem
+        if runtime.exists():
+            pairs.append((runtime, destination.parent / '.runtime' / destination.stem))
     for original, target in pairs:
         if not original.exists():
             raise FileNotFoundError(original)
@@ -90,6 +117,8 @@ def _move_skill(source: Path, destination: Path) -> None:
     moved = []
     try:
         for original, target in pairs:
+            if original != source and original.is_dir():
+                target.parent.mkdir(parents=True, exist_ok=True)
             original.rename(target)
             moved.append((original, target))
     except Exception:
@@ -128,7 +157,7 @@ def export_skill(task, destination: Path, *, description: str) -> None:
     destination = destination.resolve()
     if (not executable and destination.is_relative_to(source.resolve())):
         raise ValueError('请将导出文件保存在技能目录之外')
-    files = skill_files(source)
+    files = skill_files(source, include_runtime=False)
     manifest = skill_manifest_path(task.script_path)
     if destination in {(base / name).resolve() for name in files}:
         raise ValueError('导出文件不能覆盖技能文件')

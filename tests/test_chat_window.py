@@ -9,7 +9,7 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6 import QtCore, QtGui, QtTest, QtWidgets
-from huanzhizhi.pet.chat_window import ChatWindow, _readable_icon
+from huanzhizhi.pet.chat_window import ChatWindow, _readable_icon, _PREVIEW_ROLE, _WindowPreviews
 from huanzhizhi.platform.target_window import DesktopWindowsError, Win32DesktopApi, WindowInfo
 from huanzhizhi.settings.component import SettingsComponent
 
@@ -27,6 +27,13 @@ class ChatWindowTests(unittest.TestCase):
         with patch.object(settings, 'check_agent_configuration'):
             settings.set_ai_enabled(True)
         self.window = ChatWindow(settings=settings)
+        previews = patch.object(self.window, '_start_previews')
+        previews.start()
+        self.addCleanup(previews.stop)
+        observation = patch.object(self.window, '_observe_window')
+        self.auto_observation = observation.start()
+        self.addCleanup(observation.stop)
+        self.observation_patch = observation
         self.window.tasks_root = Path(directory.name) / 'tasks'
         self.window.tasks_root.mkdir()
         self.target = WindowInfo(123, '<b>目标应用</b>', 0, 0, 800, 600)
@@ -47,8 +54,9 @@ class ChatWindowTests(unittest.TestCase):
         self.window.deleteLater()
         self.app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
 
-    def select_target(self):
+    def select_target(self, *, observe=False):
         self.window.expand()
+        (self.window.observe_option if observe else self.window.manual_option).setChecked(True)
         self.window.window_list.setCurrentRow(0)
         QtTest.QTest.mouseClick(self.window.select_window_button, QtCore.Qt.MouseButton.LeftButton)
         self.app.processEvents()
@@ -68,6 +76,171 @@ class ChatWindowTests(unittest.TestCase):
         self.assertEqual(conversation.target_label.toolTip(), self.target.title)
         self.assertFalse(conversation.send_button.isEnabled())
         self.assertFalse(any(b.isVisible() for b in conversation.bubbles))
+        self.auto_observation.assert_not_called()
+
+    def test_default_ai_mode_waits_for_primary_button(self):
+        self.window.expand()
+        self.assertTrue(self.window.observe_option.isChecked())
+        self.assertFalse(self.window.manual_option.isChecked())
+        self.assertEqual(self.window.select_window_button.text(), 'AI先看看 →')
+        self.assertFalse(self.window.select_window_button.isEnabled())
+        self.window.window_list.setCurrentRow(0)
+        rect = self.window.window_list.visualItemRect(self.window.window_list.item(0))
+        QtTest.QTest.mouseDClick(self.window.window_list.viewport(),
+                                QtCore.Qt.MouseButton.LeftButton, pos=rect.center())
+        self.auto_observation.assert_not_called()
+        self.assertIsNone(self.window.target_window)
+        self.window.manual_option.click()
+        self.assertFalse(self.window.observe_option.isChecked())
+        self.assertEqual(self.window.select_window_button.text(), '输入需求 →')
+        self.window.observe_option.click()
+        self.auto_observation.assert_not_called()
+        self.window.select_window_button.click()
+        self.auto_observation.assert_called_once()
+        self.assertEqual(self.window.target_window, self.target)
+
+    def test_ai_choice_starts_fresh_after_existing_creation_conversation(self):
+        self.select_target()
+        self.window.conversation.add_message('user', '旧目标')
+        self.window._creation_directory = Path('old-draft')
+        self.select_target(observe=True)
+        self.auto_observation.assert_called_once()
+        self.assertIsNone(self.window._creation_directory)
+        self.assertEqual(self.window.conversation.entries, [])
+
+    def test_explicit_observation_shows_choices_and_selection_enters_creation(self):
+        import json
+        from PIL import Image
+        self.observation_patch.stop()
+        value = dict(summary='当前是象棋页面，可以创建以下助手。',
+                     suggestions=[dict(title='提示与代下', brief='可选只提示或自动落子。',
+                                       goal='创建象棋助手，通过参数选择提示或代下。')])
+        with patch('huanzhizhi.skill_creation.Win32DesktopApi') as api, \
+                patch('huanzhizhi.skill_creation.run_prompt', return_value=json.dumps(value)):
+            api.return_value.refresh.return_value = self.target
+            api.return_value.capture_client.return_value = Image.new('RGB', (800, 600))
+            self.select_target(observe=True)
+            self.wait_for_observation()
+        c = self.window.conversation
+        self.assertTrue(c.suggestions.isVisible())
+        self.assertTrue(c.input.isVisible())
+        self.assertEqual(c.entries[-1]['text'], value['summary'])
+        self.assertFalse(any(e['role'] == 'user' for e in c.entries))
+        directory = self.window._creation_directory
+        self.assertTrue((directory / 'observation.json').is_file())
+        self.assertFalse((directory / 'creation_flow.json').exists())
+        self.assertIsNone(self.window._creation_thread_id)
+        c.input.setPlainText('不要自动重开。')
+        with patch('huanzhizhi.pet.chat_window.CreationWorker') as worker:
+            c.suggestion_buttons[0].click()
+            self.assertEqual(worker.call_args.args[1], value['suggestions'][0]['goal'] + '\n补充要求：不要自动重开。')
+            self.assertEqual(worker.call_args.kwargs['directory'], directory)
+            self.assertNotIn('observe_only', worker.call_args.kwargs)
+            worker.return_value.start.assert_called_once()
+            self.assertEqual(c.suggestion_buttons, [])
+            self.assertEqual(sum(e['role'] == 'user' for e in c.entries), 1)
+            worker.return_value.stop_error = None
+            self.window._exploration_finished()
+
+    def test_observation_failure_preserves_manual_creation(self):
+        self.observation_patch.stop()
+        with patch('huanzhizhi.skill_creation.Win32DesktopApi') as api, \
+                patch('huanzhizhi.skill_creation.run_prompt') as run:
+            api.return_value.refresh.side_effect = DesktopWindowsError('window closed')
+            self.select_target(observe=True)
+            self.wait_for_observation()
+            run.assert_not_called()
+        c = self.window.conversation
+        self.assertIn('手动输入', c.entries[-1]['text'])
+        self.assertTrue(c.input.isVisible())
+        self.assertFalse(c.suggestions.isVisible())
+        with patch('huanzhizhi.pet.chat_window.CreationWorker') as worker:
+            c.input.setPlainText('创建一个象棋助手')
+            c.send_button.click()
+            self.assertEqual(worker.call_args.args[1], '创建一个象棋助手')
+            worker.return_value.stop_error = None
+            self.window._exploration_finished()
+
+    def test_stop_observation_discards_late_suggestions(self):
+        import json
+        from PIL import Image
+        self.observation_patch.stop()
+        started, release = threading.Event(), threading.Event()
+        def observe(*args, **kwargs):
+            started.set()
+            release.wait(3)
+            return json.dumps(dict(summary='迟到的建议', suggestions=[dict(title='创建', brief='提供走法建议。', goal='创建助手')]))
+        with patch('huanzhizhi.skill_creation.Win32DesktopApi') as api, \
+                patch('huanzhizhi.skill_creation.run_prompt', side_effect=observe):
+            api.return_value.refresh.return_value = self.target
+            api.return_value.capture_client.return_value = Image.new('RGB', (800, 600))
+            self.select_target(observe=True)
+            try:
+                self.assertTrue(started.wait(2))
+                self.window._stop_exploration()
+            finally:
+                release.set()
+            self.wait_for_observation()
+        self.assertEqual(self.window.conversation.suggestion_buttons, [])
+        self.assertIn('已停止查看窗口', self.window.conversation.entries[-1]['text'])
+        self.assertTrue(self.window.conversation.input.isVisible())
+
+    def test_suggestion_details_expand_without_submitting_and_selection_keeps_full_goal(self):
+        self.select_target()
+        c = self.window.conversation
+        suggestions = [
+            dict(title='走法提示', brief='推荐走法，你来落子。',
+                 goal='标出建议棋子的起点和落点，由我落子；棋局变化后更新提示。'),
+            dict(title='自动对弈', brief='自动落子，本局结束即停止。',
+                 goal='验证棋盘识别和落子能力后自动对弈，每步核对结果，本局结束或用户叫停时停止。'),
+            dict(title='提示＋自动对弈', brief='两种模式都支持，由你选择切换。',
+                 goal='创建象棋助手，通过参数切换提示和代下；每步核对棋盘，到本局结束即停止，不自动重开。'),
+        ]
+        c.set_suggestions(suggestions)
+        QtTest.QTest.qWait(220)
+        collapsed_height = c.composer.height()
+        sent = []
+        c.submitted.disconnect()
+        c.submitted.connect(sent.append)
+        for button, suggestion, (toggle, details) in zip(c.suggestion_buttons, suggestions, c._suggestion_details):
+            label = button.findChild(QtWidgets.QLabel)
+            self.assertEqual(label.text(), suggestion['title'] + '\n' + suggestion['brief'])
+            self.assertFalse(details.isVisible())
+            self.assertEqual(details.text(), suggestion['goal'])
+            self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
+            bounds = QtCore.QRect(button.mapTo(c.composer, QtCore.QPoint()), button.size())
+            self.assertTrue(c.composer.rect().contains(bounds))
+        first_toggle, first_details = c._suggestion_details[0]
+        first_toggle.click()
+        QtTest.QTest.qWait(220)
+        self.assertTrue(first_details.isVisible())
+        self.assertEqual(first_toggle.text(), '收起详情')
+        self.assertGreater(c.composer.height(), collapsed_height)
+        self.assertGreaterEqual(first_details.height(), first_details.heightForWidth(first_details.width()))
+        self.assertEqual(sent, [])
+        second_toggle, second_details = c._suggestion_details[1]
+        second_toggle.click()
+        QtTest.QTest.qWait(220)
+        self.assertFalse(first_details.isVisible())
+        self.assertFalse(first_toggle.isChecked())
+        self.assertTrue(second_details.isVisible())
+        self.assertEqual(sent, [])
+        for control in (c.input, c.send_button):
+            bounds = QtCore.QRect(control.mapTo(c.composer, QtCore.QPoint()), control.size())
+            self.assertTrue(c.composer.rect().contains(bounds))
+        second_toggle.click()
+        QtTest.QTest.qWait(220)
+        self.assertEqual(c.composer.height(), collapsed_height)
+        c.input.setPlainText('不要自动重开。')
+        c.suggestion_buttons[2].click()
+        self.assertEqual(sent, [suggestions[2]['goal'] + '\n补充要求：不要自动重开。'])
+        sent.clear()
+        c.input.setPlainText('我想做别的技能')
+        c.send_button.click()
+        self.assertEqual(sent, ['我想做别的技能'])
+        c.clear()
+        self.assertEqual(c.suggestion_buttons, [])
+        self.assertEqual(c._suggestion_details, [])
 
     def test_collapse_retains_target_and_unsent_goal(self):
         self.select_target()
@@ -88,6 +261,7 @@ class ChatWindowTests(unittest.TestCase):
         self.assertIsNone(self.window.target_window)
         self.assertTrue(self.window.conversation.isVisible())
         self.assertEqual(self.window.conversation.target_label.toolTip(), '无需窗口')
+        self.auto_observation.assert_not_called()
         self.restore_window.assert_not_called()
         with patch('huanzhizhi.pet.chat_window.CreationWorker') as worker_type:
             self.window.conversation.input.setPlainText('做一个桌宠排球')
@@ -97,6 +271,69 @@ class ChatWindowTests(unittest.TestCase):
             worker_type.return_value.start.assert_called_once()
             worker_type.return_value.stop_error = None
             self.window._exploration_finished()
+
+    def test_manual_creation_does_not_observe_and_cannot_replace_active_draft(self):
+        self.observation_patch.stop()
+        self.select_target()
+        with patch('huanzhizhi.pet.chat_window.CreationWorker') as worker:
+            c = self.window.conversation
+            c.input.setPlainText('创建库存提醒')
+            c.send_button.click()
+            self.assertNotIn('observe_only', worker.call_args.kwargs)
+            self.window._observe_window()
+            worker.assert_called_once()
+            worker.return_value.stop_error = None
+            self.window._exploration_finished()
+            self.window._observe_window()
+            worker.assert_called_once()
+
+    def test_window_cards_keep_two_columns_after_resize_and_scroll(self):
+        self.window.expand()
+        for count in (4, 8):
+            self.windows.return_value = tuple(WindowInfo(n+1, f'窗口 {n}', 0, 0, 800, 600) for n in range(count))
+            self.window._refresh_windows()
+            for width in (320, 400, 650, 400):
+                self.window.resize(width, 520)
+                QtTest.QTest.qWait(30)  # Allow the scrollbar-triggered viewport relayout.
+                listing = self.window.window_list
+                first, second, third = [listing.visualItemRect(listing.item(i)) for i in range(3)]
+                self.assertEqual(first.top(), second.top())
+                self.assertGreater(second.left(), first.left())
+                self.assertGreater(third.top(), first.top())
+                self.assertEqual(first.left(), third.left())
+                self.assertLessEqual(second.right(), listing.viewport().rect().right())
+                self.assertEqual(listing.horizontalScrollBar().maximum(), 0)
+
+    def test_stale_preview_is_ignored_after_refresh(self):
+        self.window.expand()
+        old = self.window._preview_generation
+        self.window._refresh_windows()
+        image = QtGui.QImage(100, 50, QtGui.QImage.Format.Format_RGB888)
+        image.fill(QtGui.QColor('red'))
+        self.window._preview_ready(old, self.target.hwnd, image)
+        item = self.window.window_list.item(0)
+        self.assertIsNone(item.data(_PREVIEW_ROLE))
+        self.window._preview_ready(self.window._preview_generation, self.target.hwnd, image)
+        self.assertEqual(item.data(_PREVIEW_ROLE).size(), image.size())
+
+    def test_preview_failure_continues_and_capture_is_closed(self):
+        from PIL import Image
+        second = WindowInfo(456, '第二个窗口', 0, 0, 600, 800)
+        with patch('huanzhizhi.pet.chat_window.Win32DesktopApi') as api, \
+                patch('huanzhizhi.pet.chat_window.WgcWindowCapture') as capture:
+            api.return_value.capture_client.side_effect = [
+                DesktopWindowsError('minimized'), Image.new('RGB', (600, 800), 'red')]
+            worker = _WindowPreviews((self.target, second), 5, self.window)
+            results = []
+            worker.ready.connect(lambda *args: results.append(args))
+            worker.run()
+            self.assertTrue(results[0][2].isNull())
+            self.assertEqual(results[1][2].size(), QtCore.QSize(225, 300))
+            self.assertEqual(results[1][2].pixelColor(0, 0), QtGui.QColor('red'))
+            capture.return_value.close.assert_called_once()
+            api.return_value.restore.assert_not_called()
+            worker.requestInterruption()
+            worker.deleteLater()
 
     def test_switching_between_window_and_no_window_clears_old_context(self):
         self.select_target()

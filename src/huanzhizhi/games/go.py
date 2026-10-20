@@ -1,4 +1,4 @@
-"""Go board transitions and the shared KataGo analysis client.
+"""Go board transitions, play flow and the shared KataGo analysis client.
 
 Board values are 0 empty, 1 black, 2 white, indexed from the top-left.
 Local transitions check captures and suicide, not ko/superko or scoring.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 from queue import Empty, Queue
 import subprocess
@@ -18,6 +18,7 @@ import time
 
 from huanzhizhi.python_runtime import python_executable
 from huanzhizhi.shared_components import check_katago, katago_paths, supported_components
+from huanzhizhi.task_sdk import ObservationPending
 
 LETTERS = 'ABCDEFGHJKLMNOPQRST'
 
@@ -263,3 +264,208 @@ def analyze(session, engine, initial, moves, *, initial_player='B', rules='chine
         if move != 'pass':
             parse_coordinate(move, size)
         return move
+
+
+def _observed_move(before, after, color):
+    try:
+        return single_new_stone(before, after, color)
+    except ValueError as error:
+        raise ObservationPending(str(error)) from error
+
+
+def _wait_for_manual_move(session, observe, point, board, x, y, move, color, diagnostic):
+    opponent = 3 - color
+    color_name = '黑棋' if color == 1 else '白棋'
+    size = len(board)
+
+    def validate(after, last_color):
+        if after == board:
+            return None
+        session.emit_hint([], 'clear', '正在确认棋盘')
+        additions = [(bx, by) for by in range(size) for bx in range(size)
+                     if board[by][bx] != color and after[by][bx] == color]
+        if len(additions) != 1:
+            raise ObservationPending(f'无法确认手动{color_name}落点，已停止')
+        bx, by = additions[0]
+        try:
+            expected = move_result(board, bx, by, color)
+        except ValueError as error:
+            raise ObservationPending(str(error)) from error
+        diagnostic.update(expected_board=expected, manual_move=coordinate(bx, by, size))
+        if last_color == opponent:
+            _observed_move(expected, after, opponent)
+        elif expected != after:
+            raise ObservationPending(f'棋盘变化不是合法单次{color_name}落子或提子，已停止')
+        return coordinate(bx, by, size), expected
+
+    session.emit_status('等待你落子', '仅提示', f'建议{color_name}下 {move}；也可以选择其他落点。')
+    try:
+        while not session.stop_requested:
+            if session.wait_if_paused():
+                return None  # The caller rechecks before renewing a hint or input.
+            if session.apply_parameter_updates().get('mode', 'hint') == 'auto':
+                return None
+            session.emit_hint([point(x, y)], 'click', f'建议{color_name}：{move}')
+            if session.wait_for_stop(.1):
+                break
+            diagnostic.update(stage='manual_move', before_board=board,
+                              before_source='observed_before_own_move', expected_board=None)
+            observation = observe(validate=validate, changed_only=True)
+            if observation is None or observation[2] is None:
+                continue  # Unchanged pixels or hover previews do not commit a move.
+            return observation[2]
+        raise InterruptedError('用户已停止')
+    finally:
+        session.emit_hint([], 'clear', '已结束本手提示')
+
+
+def play(session, *, observe, click, point, diagnostic, rules='chinese', komi=7.5):
+    """Run auto/hint play using three ordinary site callbacks, without pixels.
+
+    observe(validate=None, changed_only=False, retries=3, timeout=None) returns
+    (board, last_color, validation_result). last_color is 0 unknown, 1 black,
+    2 white. It calls validate(board, last_color) against each fresh observation,
+    using SDK confirm_observation for bounded, read-only retries. Only when
+    changed_only=True may it return None for an unchanged, still-valid view.
+    Every successful observation becomes the next change-detection reference.
+
+    click(x, y) sends one input through the host using the latest verified view;
+    point(x, y) maps a board index to a screen point for hints. The callbacks
+    retain window/pixel state and add capture evidence to diagnostic. Errors
+    propagate with game history attached; the skill saves its existing evidence.
+    """
+    name = session.skill['id']
+    moves_played = 0
+    initial, moves = None, []
+    resources = ExitStack()
+    engine = None
+    try:
+        mode = session.options.get('mode', 'auto')
+        if mode not in ('auto', 'hint'):
+            raise ValueError('对弈模式无效')
+        player = session.options.get('color', 'B')
+        if player not in ('B', 'W'):
+            raise ValueError('执子颜色无效')
+        color = 1 if player == 'B' else 2
+        opponent = 3 - color
+        opponent_player = 'W' if player == 'B' else 'B'
+        color_name = '黑棋' if color == 1 else '白棋'
+        opponent_name = '白棋' if color == 1 else '黑棋'
+        previous = None
+        waiting = False
+        session.emit_status('对弈中', name, '正在识别棋盘与回合')
+        while not session.stop_requested:
+            if session.wait_if_paused():
+                waiting = False
+            if session.stop_requested:
+                break
+            session.apply_parameter_updates()
+            diagnostic.update(stage='wait_opponent' if previous is not None else 'observe_board',
+                              before_board=previous if previous is not None else diagnostic.get('after_board'),
+                              before_source='expected_after_own_move' if previous is not None else 'last_observed',
+                              expected_board=None, move=None, manual_move=None)
+
+            def validate_opponent(after, last_color):
+                if previous is None or after == previous:
+                    return None
+                if last_color != opponent:
+                    raise ObservationPending(f'棋盘已变化，但无法确认{opponent_name}回合完成')
+                return _observed_move(previous, after, opponent)
+
+            observation = observe(validate=validate_opponent, changed_only=waiting)
+            if observation is None:
+                session.wait_for_stop(.1)
+                continue
+            board, last_color, opponent_move = observation
+            waiting = False
+            if opponent_move is not None:
+                wx, wy = opponent_move
+                moves.append([opponent_player, coordinate(wx, wy, len(board))])
+                previous = None
+            occupied = any(v for row in board for v in row)
+            our_turn = last_color == opponent if occupied else color == 1
+            if previous is not None or not our_turn:
+                waiting = True
+                session.wait_for_stop(.1)
+                continue
+            if initial is None:
+                initial = [row.copy() for row in board]
+            if engine is None:
+                diagnostic['stage'] = 'engine_start'
+                engine = resources.enter_context(start_engine())
+            diagnostic['stage'] = 'engine_analysis'
+            move = analyze(session, engine, initial, moves, initial_player=player, rules=rules, komi=komi)
+            diagnostic['move'] = move
+            if move.lower() == 'pass':
+                session.emit_finished('已完成', '建议虚手', 'KataGo 建议虚手，交由用户决定。')
+                return
+            x, y = parse_coordinate(move, len(board))
+            if board[y][x] != 0:
+                raise ValueError(f'KataGo 落点与棋盘不符：{move}')
+            if session.stop_requested:
+                break
+            manual_move = None
+            while not session.stop_requested:
+                session.wait_if_paused()
+                if session.stop_requested:
+                    break
+                diagnostic.update(stage='before_click_recheck', before_board=board,
+                                  before_source='observed_before_analysis', expected_board=None)
+
+                def validate_unchanged(current, current_last_color):
+                    if current != board or current_last_color != last_color:
+                        raise ObservationPending('分析或模式切换期间棋盘或回合已变化，已停止')
+
+                observe(validate=validate_unchanged)
+                mode = session.apply_parameter_updates().get('mode', 'auto')
+                if mode == 'auto':
+                    break
+                manual_move = _wait_for_manual_move(
+                    session, observe, point, board, x, y, move, color, diagnostic)
+                if manual_move is not None:
+                    break
+            if session.stop_requested:
+                break
+            if manual_move is not None:
+                move, previous = manual_move
+                moves.append([player, move])
+                moves_played += 1
+                session.emit_status('对弈中', f'已确认{color_name}', f'第 {moves_played} 手：{move}；等待{opponent_name}')
+                continue
+            diagnostic['stage'] = 'click'
+            click(x, y)
+            expected_own = move_result(board, x, y, color)
+            diagnostic.update(stage='confirm_own_move', before_board=board,
+                              before_source='observed_before_own_move', expected_board=expected_own)
+
+            def validate_own(after, after_last_color):
+                if after == expected_own:
+                    return
+                if after_last_color == opponent:
+                    try:
+                        single_new_stone(expected_own, after, opponent)
+                    except ValueError:
+                        pass
+                    else:
+                        return
+                raise ObservationPending(f'{move} 点击后未见完整合法落子，已停止')
+
+            if session.wait_for_stop(.2):
+                raise InterruptedError('用户已停止')
+            # Confirmation is read-only; the submitted click is never repeated.
+            after, _, _ = observe(validate=validate_own, retries=24, timeout=5)
+            if after == expected_own:
+                waiting = True
+            moves.append([player, move])
+            previous = expected_own
+            moves_played += 1
+            session.emit_status('对弈中', f'已落{color_name}', f'第 {moves_played} 手：{move}')
+        session.emit_finished('已停止', name, f'已按请求停止，本次落 {moves_played} 手', stopped_by_request=True)
+    except InterruptedError:
+        session.emit_finished('已停止', name, f'已按请求停止，本次落 {moves_played} 手', stopped_by_request=True)
+    except Exception:
+        diagnostic.update(initial_board=initial, moves=moves, moves_played=moves_played,
+                          options=dict(session.options))
+        raise
+    finally:
+        resources.close()

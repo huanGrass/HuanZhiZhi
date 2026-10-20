@@ -1,8 +1,8 @@
 # 共享游戏数据与调用示例
 
-公共代码位于 `src/huanzhizhi/games/`，与宿主一起提供。按需导入，不启动服务、不自动下载组件。技能可以在任意草稿目录运行，不依赖另一个技能目录。当前只有两个游戏模块，不需要注册表、工厂或适配器基类。
+公共代码位于 `src/huanzhizhi/games/`，与宿主一起提供。按需导入，不启动服务、不自动下载组件。技能可以在任意草稿目录运行，不依赖另一个技能目录。当前提供扫雷、围棋和象棋模块，不需要注册表、工厂或适配器基类。
 
-新技能先完成“截图 → 棋盘数据”的适配，再调用下面的公共逻辑。窗口选择、坐标、规则/回合识别、动画等待、输入、结果确认与结束条件仍由技能负责。先用静态数据验证识别，再通过现有任务运行链验证实际效果；公共求解正确不等于新界面已适配。
+新技能先完成“截图 → 棋盘数据”的适配，再调用下面的公共逻辑。窗口选择、坐标、界面规则与回合识别、实际输入及网站特有的结束条件由技能负责；围棋和象棋还可复用下述对弈流程，处理各自已支持的回合推进和落子核对。先用静态数据验证识别，再通过现有任务运行链验证实际效果；公共求解正确不等于新界面已适配。
 
 ## 扫雷
 
@@ -74,6 +74,59 @@ with go.start_engine() as engine:
 `rules` 使用 KataGo 规则名称，`komi` 是实际贴目；不要因默认值方便而忽略界面设定。`session.options["max_visits"]` 沿用现有字符串档位 `"80"`、`"160"`、`"320"`，默认 `"80"`。每次分析有 45 秒上限、可响应停止并核对响应 ID 与行棋方；超时、异常或停止后退出 `with` 清理进程，不继续使用该引擎上下文。接口只支持依次查询，不并发发送。
 
 协议依据：[KataGo 1.18.2 Analysis Engine](https://github.com/lightvector/KataGo/blob/v1.18.2/docs/Analysis_Engine.md)。公共通信代码从已有围棋技能提取，保留复用进程、可中断等待和异常清理。
+
+### 复用对弈流程
+
+`go.play(session, *, observe, click, point, diagnostic, rules='chinese', komi=7.5)` 提供执黑/执白、自动/提示模式、回合推进、实际棋谱记录、KataGo 分析及落子核对。直接传三个普通函数或绑定方法，不需要继承接口、注册适配器或创建工厂：
+
+```python
+go.play(session, observe=site.observe, click=site.click, point=site.point,
+        diagnostic=diagnostic, rules="chinese", komi=7.5)
+```
+
+`site` 是技能自身保存窗口、最新截图、坐标和采样状态的对象，也可以使用普通函数保存这些状态。三个回调的约定：
+
+- `observe(validate=None, *, changed_only=False, retries=3, timeout=None)`：获取当前画面，识别并返回 `(board, last_color, result)`。`last_color` 为最后确认落子的颜色：`0` 不确定、`1` 黑、`2` 白；不能用棋子数量猜测。传入 `validate` 时，对当前识别调用 `validate(board, last_color)`，把其返回值作为 `result`。复用 SDK `confirm_observation`，只对 `ObservationPending` 重新截图复检，保持同一参考局面，并遵守传入的重试次数、超时和停止请求。窗口、权限和输入等明确错误直接抛出。
+- 只有 `changed_only=True` 且画面未变、窗口与坐标仍有效时，`observe` 才能返回 `None` 来跳过完整识别；否则必须确认当前棋盘。每次成功观察更新轻量变化检测的参考，分析后、模式切换后或暂停恢复后的强制观察不得使用这个捷径。失败复检必须获取新画面，不能把旧帧重复当作新证据。
+- `point(x, y)`：将棋盘索引转换为当前屏幕坐标，供公共流程显示提示。`click(x, y)`：使用最近确认的窗口和客户区坐标，通过宿主发送一次点击；保留窗口有效性及停止检查，不自行重复点击。
+
+`session.options` 沿用 `color`（`B`/`W`，启动时确定）、`mode`（`auto`/`hint`，运行时切换）与 `max_visits`。模式切换、暂停恢复后先重新确认局面；提示模式允许用户选择其他合法落点，没有手动落子的等待超时。自动落子只发送一次，随后只读确认结果，兼容已包含对手快速应手的画面；己方结果确认最多 25 次、约 5 秒，普通确认最多 4 次。分析期间发生的模式切换在下次点击前应用，已发出的点击先完成结果确认。
+
+`diagnostic` 是技能维护的普通字典：公共流程填写阶段、参考棋盘、预期结果、实际走法与运行参数；适配函数补充窗口、截图和识别证据。异常向调用方抛出，由技能保存已有画面与诊断，不为保存证据重新截图或操作。公共流程负责正常停止、虚手建议的完成通知，以及引擎清理；KataGo 建议虚手时结束，不自动虚手、重开或认输。
+
+这一流程仍需要网站可靠识别棋盘及末手颜色，不自动恢复接手前的完整棋谱，也不通用识别终局页面。使用默认规则和贴目前仍须确认目标网站设定。
+
+## 象棋
+
+`from huanzhizhi.games import xiangqi`
+
+`START` 是标准开局的 90 格列表，从左上角逐行排列，每行 9 格：`.` 为空，`rnbakcp` 表示黑方车、马、象、士、将、炮、卒，大写为红方。走法用皮卡鱼坐标，例如 `b2e2`。`apply_move(board, move)` 返回移动或吃子后的副本，检查起点非空、目标不是己方；它不是完整规则引擎，调用前必须用 `Engine.legal(moves)` 核对合法性。
+
+`xiangqi.check_engine()` 复用共享组件的引擎、模型和实际搜索检查，用于 `describe(__file__, environment_checks={"皮卡鱼": xiangqi.check_engine})`。`Engine(session, record)` 沿用共享依赖路径，整局复用一个皮卡鱼进程与 NNUE；`legal(moves)` 查询合法走法，`search(moves)` 搜索 500 毫秒并返回走法或 `None`，`close()` 回收线程和管道。请求按顺序发送，等待可停止、单次响应有 12 秒上限；必须在 `finally` 中关闭。
+
+`Game(session, view, *, checkpoint_file)` 从已确认的标准开局历史继续自动执红，负责历史重放与持久化、暂停恢复核对、回合推进、搜索、选中确认、落子及快速应手核对、超时和停止。当前没有增加执黑、提示模式、任意 FEN 接管或自动重开功能。`view` 是技能自己的具体对象，不继承公共基类，不注册到框架：
+
+```python
+state = session.runtime_dir / "state"
+state.mkdir(parents=True, exist_ok=True)
+game = xiangqi.Game(session, view, checkpoint_file=state / "checkpoint.json")
+try:
+    game.run()
+except xiangqi.GameEnded as result:
+    session.emit_finished("棋局结束", "本局对弈已结束", str(result))
+finally:
+    game.close()
+    view.close()  # 技能自己的日志等资源；停止与异常通知沿用任务 SDK。
+```
+
+适配对象只负责以下网站和证据操作，方法详情见 `Game` 文档字符串：
+
+- `observe(after=None)` / `stable()` 返回 `(evidence, board, layout, selected)`：证据对象不由公共模块解析，棋盘须归一为上述标准棋子；`layout` 是可比较的输入映射及相关状态快照，坐标或影响点击的网页标记变化时必须不同；`selected` 为 90 个选中标记。`observe(after=...)` 必须使用该时间戳之后的画面。不要通过棋子归一化隐藏网页终局标记等输入状态变化。
+- `initial_history(observation)` 返回可见走法、总半回合数、是否可见开局起始标记、诊断依据；先核实页面方向、玩家颜色及开局设置。`history(observation)` 返回可见走法和总半回合数。完整历史验证、检查点续接与合法性重放由公共模块执行；缺失或冲突时停止，不编造历史。
+- `click(layout, square, *, ply)` 把棋盘坐标转换为客户区像素，检查停止与窗口有效性后调用宿主输入。`finish_reason(observation, moves, legal)` 核实网页终局标记与引擎结果一致，再返回网站特有的结束原因或 `None`。四次重复、无进攻子力等当前网页规则留在网站适配中，不作为通用象棋规则。
+- `record(event, **data)`、`record_frame(observation)`、`mark_move(observation, move, ply)` 保留技能自己的日志和截图留证。预标注在点选之前，正常落子留证在确认之后；点选到落点之间不保存截图。
+
+启动和暂停恢复时核对网页棋谱；正常回合由完整棋盘及唯一合法走法推进，不反复读取文字棋谱。点选后一次新鲜、明确的观察同时核对棋盘、输入映射和唯一选中棋子；随后检查停止再点击落点，不额外重复全盘识别。模糊反馈只观察、限时等待，不能误点；确认超时不重复点击。网站的识别阈值、截图区域、窗口规则和错误截图仍在独立技能中。
 
 ## 分发与修改范围
 

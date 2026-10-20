@@ -19,7 +19,7 @@ class EditSkillTests(unittest.TestCase):
         self.addCleanup(settings.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.source = self.root / 'tasks/legacy_skill'
         self.source.mkdir(parents=True)
         self.original = ('from huanzhizhi.task_sdk import describe, TaskSession\n'
@@ -83,6 +83,53 @@ class EditSkillTests(unittest.TestCase):
             self.worker.run()
         self.assertEqual(self.errors, [])
         self.assertEqual((Path(self.saved[0])/'notes.txt').read_text(), 'pending')
+
+    def test_edit_preserves_original_runtime_and_backup_without_copying_draft_runtime(self):
+        runtime = self.source / '.runtime'
+        (runtime / 'state').mkdir(parents=True)
+        (runtime / 'state/checkpoint.json').write_bytes(b'original state')
+        (runtime / 'runs').mkdir()
+        (runtime / 'runs/frame.png').write_bytes(b'original evidence')
+
+        def complete(worker):
+            working = worker.directory / 'working' / self.source.name
+            self.assertFalse((working / '.runtime').exists())
+            result = self.complete(worker)
+            draft = worker.directory / 'output' / self.source.name / '.runtime'
+            (draft / 'state').mkdir(parents=True)
+            (draft / 'state/checkpoint.json').write_bytes(b'draft state')
+            (draft / 'draft-only.txt').write_text('discard on publication')
+            return result
+
+        with patch('huanzhizhi.skill_creation.develop', side_effect=complete):
+            self.worker.run()
+        self.assertEqual(self.errors, [], self.logs)
+        self.assertTrue(self.saved)
+        self.assertEqual((runtime / 'state/checkpoint.json').read_bytes(), b'original state')
+        self.assertEqual((runtime / 'runs/frame.png').read_bytes(), b'original evidence')
+        self.assertFalse((runtime / 'draft-only.txt').exists())
+        backup = self.worker.directory / 'backup' / self.source.name / '.runtime'
+        self.assertEqual(_skill_files(runtime), _skill_files(backup))
+        self.assertEqual((self.worker.directory / 'output' / self.source.name /
+                          '.runtime/state/checkpoint.json').read_bytes(), b'draft state')
+
+    def test_runtime_copy_failure_leaves_original_untouched(self):
+        runtime = self.source / '.runtime'
+        runtime.mkdir()
+        (runtime / 'state.json').write_bytes(b'original state')
+        original_copy = shutil.copytree
+
+        def copy(source, destination, *args, **kwargs):
+            if Path(source) == runtime:
+                raise OSError('runtime copy failed')
+            return original_copy(source, destination, *args, **kwargs)
+
+        with patch('huanzhizhi.skill_creation.develop', side_effect=self.complete), \
+                patch('shutil.copytree', side_effect=copy):
+            self.worker.run()
+        self.assert_original()
+        self.assertIn('runtime copy failed', self.logs[-1])
+        self.assertEqual((runtime / 'state.json').read_bytes(), b'original state')
 
     def test_invalid_output_does_not_replace_original(self):
         def invalid(worker):
@@ -191,6 +238,9 @@ class EditSkillTests(unittest.TestCase):
         self.assertFalse(self.errors)
 
     def test_failed_replacement_restores_original_and_can_retry(self):
+        runtime = self.source / '.runtime'
+        runtime.mkdir()
+        (runtime / 'state.json').write_bytes(b'original state')
         real_rename = Path.rename
         def rename(path, target):
             if path.name.startswith('publish_'):
@@ -199,6 +249,7 @@ class EditSkillTests(unittest.TestCase):
         with patch('huanzhizhi.skill_creation.develop', side_effect=self.complete), patch.object(Path, 'rename', rename):
             self.worker.run()
         self.assert_original()
+        self.assertEqual((runtime / 'state.json').read_bytes(), b'original state')
         self.assertIn('simulated replacement failure', self.logs[-1])
         self.assertNotIn('simulated replacement failure', self.errors[-1])
         self.errors.clear()
@@ -206,6 +257,7 @@ class EditSkillTests(unittest.TestCase):
             self.worker.run()
         self.assertEqual(self.errors, [])
         self.assertEqual(self.saved, [str(self.source.resolve())])
+        self.assertEqual((runtime / 'state.json').read_bytes(), b'original state')
 
 
 class CreationTests(unittest.TestCase):
@@ -284,6 +336,20 @@ class CreationTests(unittest.TestCase):
         with patch('huanzhizhi.skill_creation.develop') as model:
             resumed.run()
         model.assert_not_called()
+
+    def test_new_skill_does_not_publish_draft_runtime(self):
+        def prepare(worker):
+            result = self.prepare_task(worker)
+            runtime = worker.directory / 'output/确定性测试技能/.runtime'
+            runtime.mkdir()
+            (runtime / 'private.png').write_bytes(b'draft evidence')
+            return result
+
+        with patch('huanzhizhi.skill_creation.develop', side_effect=prepare):
+            self.worker.run()
+        self.assertEqual(self.errors, [], self.logs)
+        self.assertFalse((Path(self.saved[0]) / '.runtime').exists())
+        self.assertTrue((self.worker.directory / 'output/确定性测试技能/.runtime/private.png').is_file())
 
     def test_existing_chinese_skill_is_preserved_and_draft_can_be_renamed(self):
         existing = self.worker.tasks_root / '确定性测试技能' / 'task.py'

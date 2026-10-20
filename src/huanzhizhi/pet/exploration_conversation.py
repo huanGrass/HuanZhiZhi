@@ -179,6 +179,14 @@ class ExplorationConversation(QtWidgets.QWidget):
         header.addWidget(self.close_button)
         composer_layout.addLayout(header)
         composer_layout.addSpacing(3)
+        self.suggestions = QtWidgets.QWidget()
+        self.suggestion_buttons = []
+        self._suggestion_details = []
+        self._suggestion_layout = QtWidgets.QVBoxLayout(self.suggestions)
+        self._suggestion_layout.setContentsMargins(0, 0, 0, 6)
+        self._suggestion_layout.setSpacing(5)
+        self.suggestions.hide()
+        composer_layout.addWidget(self.suggestions)
         self.input = QtWidgets.QTextEdit()
         self.input.setAcceptRichText(False)
         self.input.setFixedHeight(56)
@@ -312,14 +320,106 @@ class ExplorationConversation(QtWidgets.QWidget):
         self.history_button.setText('历史')
         self._history_open = False
         self.input.clear()
+        self.set_suggestions([])
         self.set_visible(False)
+
+    def set_suggestions(self, suggestions):
+        while self._suggestion_layout.count():
+            button = self._suggestion_layout.takeAt(0).widget()
+            button.hide()
+            button.deleteLater()
+        self.suggestion_buttons = []
+        self._suggestion_details = []
+        for suggestion in suggestions:
+            card = QtWidgets.QFrame()
+            card.setObjectName('suggestionCard')
+            card.setStyleSheet('QFrame#suggestionCard { background: #f7f2fc;'
+                              'border: 1px solid #e3d6f0; border-radius: 9px; }')
+            row = QtWidgets.QVBoxLayout(card)
+            row.setContentsMargins(9, 6, 9, 6)
+            row.setSpacing(3)
+            button = QtWidgets.QPushButton()
+            text = suggestion['title'] + '\n' + suggestion['brief']
+            button.setAccessibleName(text)
+            button.setToolTip('选择这个方案')
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet('QPushButton { background: transparent; border: none;'
+                                'border-radius: 5px; } QPushButton:hover { background: #eee3fc; }'
+                                'QPushButton:focus { border: 1px solid #b395d3; }')
+            summary_layout = QtWidgets.QVBoxLayout(button)
+            summary_layout.setContentsMargins(0, 0, 0, 0)
+            label = QtWidgets.QLabel(text)
+            label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            label.setStyleSheet('font-size: 12px; background: transparent;')
+            label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            summary_layout.addWidget(label)
+            button.setFixedHeight(label.heightForWidth(288))
+            button.clicked.connect(lambda checked=False, goal=suggestion['goal']: self._submit_suggestion(goal))
+            row.addWidget(button)
+            toggle = QtWidgets.QToolButton()
+            toggle.setText('展开详情')
+            toggle.setAccessibleName(suggestion['title'] + '：展开详情')
+            toggle.setCheckable(True)
+            toggle.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            toggle.setStyleSheet('QToolButton { color: #8057b3; background: transparent;'
+                                'border: none; padding: 2px 0; font-size: 11px; }'
+                                'QToolButton:hover { color: #62418a; }')
+            row.addWidget(toggle, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+            details = QtWidgets.QLabel(suggestion['goal'])
+            details.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            details.setWordWrap(True)
+            details.setStyleSheet('font-size: 12px; color: #71657e; background: transparent;')
+            details.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            details.setFixedHeight(details.heightForWidth(288))
+            details.hide()
+            row.addWidget(details)
+            self._suggestion_details.append((toggle, details))
+            toggle.toggled.connect(lambda checked, control=toggle: self._toggle_suggestion_details(control, checked))
+            self._suggestion_layout.addWidget(card)
+            self.suggestion_buttons.append(button)
+        self._resize_suggestions()
+        self.set_busy(self._busy)
+
+    def _toggle_suggestion_details(self, control, checked):
+        # Keep only one explanation open so the input remains within reach.
+        for toggle, details in self._suggestion_details:
+            expanded = toggle is control and checked
+            with QtCore.QSignalBlocker(toggle):
+                toggle.setChecked(expanded)
+            toggle.setText('收起详情' if expanded else '展开详情')
+            title = toggle.accessibleName().rsplit('：', 1)[0]
+            toggle.setAccessibleName(title + '：' + toggle.text())
+            details.setVisible(expanded)
+        self._resize_suggestions()
+        self.set_busy(self._busy)
+
+    def _resize_suggestions(self):
+        height = 6
+        for index in range(self._suggestion_layout.count()):
+            card = self._suggestion_layout.itemAt(index).widget()
+            card.setFixedHeight(card.layout().sizeHint().height())
+            height += card.height() + (5 if index else 0)
+        self.suggestions.setFixedHeight(height)
+
+    def _submit_suggestion(self, goal):
+        if not self._busy:
+            extra = self.input.toPlainText().strip()
+            self.submitted.emit(goal + ('\n补充要求：' + extra if extra else ''))
+
+    def _suggestion_height(self):
+        return self.suggestions.height() if self.suggestion_buttons and not self._busy else 0
+
+    def _composer_height(self):
+        return (95 if self._busy else 155) + self._suggestion_height()
 
     def set_busy(self, busy: bool):
         self._busy = busy
+        self.suggestions.setVisible(bool(self.suggestion_buttons) and not busy)
         self.input.setVisible(not busy)
         self.send_button.setVisible(not busy)
         if not self._shown:
-            self.composer.setFixedHeight(95 if busy else 155)
+            self.composer.setFixedHeight(self._composer_height())
         self.stop_button.setText('停止' if busy else '返回')
         self.stop_button.setToolTip('停止当前探索' if busy else '返回任务列表')
         self.stop_button.setEnabled(True)
@@ -391,7 +491,7 @@ class ExplorationConversation(QtWidgets.QWidget):
                 bubble.hide()
                 bubble.setWindowOpacity(1.0)
             self.history_window.hide()
-            self.composer.setFixedHeight(95 if self._busy else 155)
+            self.composer.setFixedHeight(self._composer_height())
             self.input.setFixedHeight(56)
         self.setVisible(self._shown)
         if self._shown:
@@ -433,7 +533,7 @@ class ExplorationConversation(QtWidgets.QWidget):
         height = round(start+(end-start)*progress)
         self.composer.setFixedHeight(height)
         if not self._busy:
-            self.input.setFixedHeight(max(0, round(56*(height-95)/60)))
+            self.input.setFixedHeight(max(0, min(56, round(56*(height-95-self._suggestion_height())/60))))
         margins = self.layout().contentsMargins()
         self.resize(self.width(), height+margins.top()+margins.bottom())
         for widget, start, end, opacity in self._motion_frames:
@@ -523,7 +623,7 @@ class ExplorationConversation(QtWidgets.QWidget):
         left_side = self._left_side
         x = left_x if left_side else pet.right()+13-margins.left()
         x = min(max(x, area.left()), area.right()-self.width()+1)
-        target_height = 95 if self._busy else 155
+        target_height = self._composer_height()
         window_height = target_height+margins.top()+margins.bottom()
         bottom = min(max(pet.bottom()+margins.bottom(), area.top()+window_height), area.bottom())
         recent = self._recent_bubbles()

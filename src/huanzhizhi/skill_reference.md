@@ -8,7 +8,7 @@
 
 - **技能清单与事件**：每个技能同时交付 `skill.json` 和 `task.py`。清单是 ID、说明、展示方式、参数定义和环境检查名称的唯一来源；宿主直接读 JSON，不执行技能。SDK `src/huanzhizhi/task_sdk.py` 的 `describe(__file__, environment_checks=...)` 处理运行前环境检查及兼容的 `--describe` 输出；`TaskSession(__file__)` 从同一清单读取 ID、参数默认值和运行时可调范围，通过 `session.skill["id"]` 获取名称（旧代码读取 `name` 时由 SDK 返回同一值）。不要在 Python 中重复定义元数据或向 `TaskSession` 传参数定义。技能只持久化 id，不再保存 name，id 与目录名使用完全相同的中文技能名称；手动改目录后宿主同步 id 并迁移设置；名称只用中文、字母、数字、下划线或连字符，以中文、字母或数字开头且必须含中文。修改已有技能时保留原值。
 - **入口示例**：SDK 中 `describe` 的文档给出最小接法；优先参考相关已安装技能的 task.py。窗口截图、组件定位与验证脚本见[常用调用示例](skill_examples.md)。
-- **共享游戏逻辑**：扫雷与围棋先读[游戏数据格式与调用示例](game_examples.md)，直接导入 `huanzhizhi.games.minesweeper` 或 `huanzhizhi.games.go`，不把规则、求解器或引擎通信代码复制进技能。扫雷已有确定性推理与有界概率搜索；围棋已有落子/提子校验及可复用的 KataGo 进程，支持不同棋盘尺寸与行棋方。技能负责将截图转换成约定数据、确认规则和回合、映射输入、核对结果与胜负。公共模块不是通用图像识别器，也不保证仅凭一张截图恢复完整棋谱；不支持的规则需明确说明。
+- **共享游戏逻辑**：扫雷、围棋与象棋先读[游戏数据格式与调用示例](game_examples.md)，按需导入 `huanzhizhi.games.minesweeper`、`go` 或 `xiangqi`，不把规则、求解器或引擎通信代码复制进技能。扫雷已有确定性推理与有界概率搜索；围棋已有落子/提子校验、可复用的 KataGo 进程及 `go.play` 对弈流程，统一处理执黑/执白、自动/提示切换、回合推进、落子核对与停止。象棋已有共享皮卡鱼客户端 `xiangqi.Engine` 和自动执红流程 `xiangqi.Game`，保留历史续接、唯一合法走法核对和连续点击间的性能优化。技能提供网站观察、坐标及输入适配、页面规则与终局反馈，不重复实现公共流程；使用普通函数或具体对象，不新增适配器基类。公共模块不是通用图像识别器，也不保证仅凭一张截图恢复完整棋谱；不支持的模式和规则需明确说明。
 - **共享外部组件**：[支持清单](shared_components.json)与设置中的“外部组件”共用，包含组件用途、版本、文件位置、依赖和官方调用协议；列入清单不代表本机已经安装。编写业务策略前先读清单，筛选相关组件并阅读说明、完成最小实际调用；适用且可用时优先复用，不直接另写简化策略。清单的文件路径相对于 `dependencies/`；当前 KataGo 的路径与子进程环境可复用 `shared_components.katago_paths`，实际检查可复用 `check_katago`（逐项返回结果，调用者须检查所有结果）。皮卡鱼可复用 `check_pikafish(component, root)`，同样须消费全部结果；引擎和 NNUE 路径直接读取清单的 `engine`、`model` 字段，相对于 `root / "dependencies"`。KataGo 检查短暂使用 GPU，皮卡鱼使用 CPU；只读共享文件，临时配置和日志自动清理。
   用户手动准备或通过“设置 → 外部组件”一键安装的外部程序和模型放在项目或发行包根目录的 `dependencies/`，规则见 [目录说明](../../dependencies/README.md)。用 `huanzhizhi.python_runtime.python_executable().parent.parent / "dependencies"` 定位，不能依赖草稿目录层级、当前工作目录或开发机绝对路径。只使用已具备的资源，不下载、安装或修改共享组件；用户指定的必要组件缺失时说明阻碍、引导用户到“设置 → 外部组件”检测并安装，保留草稿，不擅自替换方案或交付未验证技能。多个技能可引用同一份兼容组件，不复制进技能目录；配置、日志和业务数据不写入共享目录。技能 README 和依赖检查的失败说明应提供适用版本、官方来源及放置位置，供使用已有技能的用户自行准备。
 - **额外依赖**：在 `skill.json` 的 `environment_checks` 中仅列出实际需要的检查名称，并在 `describe(__file__, environment_checks={"依赖名称": 检查函数})` 中提供同名函数，名称集合必须完全一致。函数无参数，只读检查实际要求（版本、导入、GPU 运算或引擎启动），满足时返回非空说明，不满足时抛出具体错误；不得安装组件、修改配置、操作窗口或向 stdout 打印日志。额外依赖在函数内导入。SDK 在 `--run` 的业务逻辑前检查，失败即退出；`--check-environment` 单独调用同一组检查。列表读取清单时不运行检查。
@@ -43,6 +43,22 @@ if __name__ == "__main__":
 ```
 
 清单可选字段：`presentation`（`persistent` 或 `launch_only`）、`debug_steps`、`parameters`、`environment_checks`。参数结构沿用 `src/huanzhizhi/parameters.py` 的整数/选项规则；只有 `runtime: true` 的参数可以运行中调整。缺少清单、重复 JSON 字段、非法值或 ID 与目录不符都会拒绝加载，不从 Python 回退推导。草稿实机验证也需要在入口所在的同名技能目录内准备清单；最终交付前只在 working/草稿目录开发，不提前写入 output。
+
+## 技能内运行数据
+
+`session.runtime_dir` 是技能根目录下 `.runtime/` 的绝对 `Path`，不依赖当前工作目录。辅助脚本可使用 `from huanzhizhi.task_sdk import runtime_directory`，并传入该技能的 `task.py` 路径。接口只定位，不创建目录或读取旧状态；按实际需要创建子目录：
+
+```python
+state = session.runtime_dir / 'state'
+state.mkdir(parents=True, exist_ok=True)
+checkpoint = state / 'checkpoint.json'
+```
+
+截图、详细日志和诊断写入 `.runtime/runs/<本次运行>/`；可重建缓存写入 `.runtime/cache/`；必须保留的用户数据、续局状态写入 `.runtime/state/`，不得作为缓存清理。临时文件也应位于 `.runtime/` 内。普通文本日志继续使用 `session.emit_log()`。代码、默认配置、识别模板、许可证等必需资源保留在技能目录其他位置，读取资源仍可相对于 `__file__`。
+
+宿主导出和交付复制仅排除技能根目录的 `.runtime/` 及 Python 字节码，不按图片或 JSON 后缀排除资源。本地完整备份、重命名和转正继续携带 `.runtime/`。修改工作副本不复制原有运行数据；草稿验证独立生成数据，保存时保留原安装技能的 `.runtime/`，不采用草稿数据。不要为了复现旧状态擅自访问安装目录；需要的测试输入由本次授权范围决定。
+
+旧版独立 EXE 共用安装目录时，路径为其旁边的 `.runtime/<EXE文件名去后缀>/`，避免不同程序共用状态。普通 Python 技能始终使用自己目录内的 `.runtime/`。
 
 ## 技能实机验证
 

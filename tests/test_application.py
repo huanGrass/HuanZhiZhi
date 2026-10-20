@@ -763,6 +763,8 @@ s.emit_finished('已停止','测试任务','结束',stopped_by_request=True)
     def open_chat(self):
         chat = self.host.chat
         chat.expand()
+        # These conversation tests start with manual input, without AI observation.
+        chat.manual_option.setChecked(True)
         target = WindowInfo(123, '测试窗口', 0, 0, 800, 600)
         with patch.object(chat, '_available_windows', return_value=(target,)):
             chat._refresh_windows()

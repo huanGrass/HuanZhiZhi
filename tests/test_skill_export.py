@@ -13,7 +13,7 @@ class SkillExportTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.source = self.root / 'tasks' / '演示'
         self.source.mkdir(parents=True)
         (self.source / 'task.py').write_text('raise RuntimeError("must not execute")', encoding='utf-8')
@@ -44,6 +44,27 @@ class SkillExportTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), b'original')
         self.assertEqual(list(self.root.glob('*.zip')), [self.output])
 
+    def test_root_runtime_is_excluded_without_reading_it_or_losing_resources(self):
+        runtime = self.source / '.runtime'
+        (runtime / 'state').mkdir(parents=True)
+        checkpoint = runtime / 'state/checkpoint.json'
+        checkpoint.write_bytes(b'private state')
+        (self.source / 'assets/.runtime').mkdir()
+        (self.source / 'assets/.runtime/reference.png').write_bytes(b'resource')
+        read_bytes = Path.read_bytes
+
+        def read_resource(path):
+            if path.is_relative_to(runtime):
+                raise AssertionError('Export must not read runtime files')
+            return read_bytes(path)
+
+        with mock.patch.object(Path, 'read_bytes', read_resource):
+            export_skill(self.task, self.output, description='')
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertFalse(any(name.startswith('演示/.runtime/') for name in archive.namelist()))
+            self.assertEqual(archive.read('演示/assets/.runtime/reference.png'), b'resource')
+        self.assertEqual(checkpoint.read_bytes(), b'private state')
+
     def test_destination_inside_skill_rejected(self):
         with self.assertRaisesRegex(ValueError, '技能目录之外'):
             export_skill(self.task, self.source / 'export.zip', description='')
@@ -54,6 +75,9 @@ class SkillExportTests(unittest.TestCase):
         entry.parent.mkdir()
         entry.write_bytes(b'EXE')
         entry.with_suffix('.skill.json').write_text(json.dumps({'protocol_version': 1, 'id': 'demo'}))
+        runtime = entry.parent / '.runtime' / entry.stem
+        runtime.mkdir(parents=True)
+        (runtime / 'state.json').write_text('private')
         (entry.parent / 'unrelated.txt').write_text('private')
         task = TaskCatalog(entry.parent).reload()[0]
         export_skill(task, self.output, description='legacy')

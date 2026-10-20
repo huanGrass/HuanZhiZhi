@@ -55,6 +55,27 @@ class AgentInputLifecycleTests(unittest.TestCase):
                                     stdout_name='stdout.txt',
                                     environment={'HUANZHIZHI_INPUT_MODE': 'background'})
 
+    def test_observation_never_forwards_input_and_removes_inherited_click_channel(self):
+        self.events = [REQUEST]
+        with self.assertRaisesRegex(ai_runtime.AgentTaskError, '不允许的输入'):
+            ai_runtime.run_agent(self.worker, ['fixture-agent'], self.turn,
+                                 stdout_name='stdout.txt', allow_input=False,
+                                 environment={'HUANZHIZHI_CLICK_EVENTS': 'inherited-channel'})
+        self.worker.input_request.emit.assert_not_called()
+        self.worker.click_point.emit.assert_not_called()
+        environment = self.popen.call_args.kwargs['env']
+        self.assertNotIn('HUANZHIZHI_CLICK_EVENTS', environment)
+        self.assertNotIn('HUANZHIZHI_INPUT_MODE', environment)
+        self.stop.assert_called_once()
+
+    def test_observation_timeout_stops_child_and_preserves_diagnostics(self):
+        with patch.object(ai_runtime.time, 'monotonic', side_effect=[0, 121]), \
+                self.assertRaisesRegex(ai_runtime.AgentTaskError, '查看窗口超时'):
+            ai_runtime.run_agent(self.worker, ['fixture-agent'], self.turn,
+                                 stdout_name='stdout.txt', allow_input=False, timeout=120)
+        self.stop.assert_called_once()
+        self.assertTrue((self.turn / 'stderr.txt').exists())
+
     def test_foreground_environment_and_acknowledgement_use_the_same_channel(self):
         self.events = [REQUEST]
 

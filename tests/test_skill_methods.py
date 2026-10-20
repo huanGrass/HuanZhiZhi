@@ -40,6 +40,8 @@ class SkillMethodTests(unittest.TestCase):
     def test_rule_is_tested_saved_and_reused_on_new_data(self):
         result = define_method(self.directory, 'custom_sum', sum_spec())
         self.assertEqual(result['tests_passed'], 3)
+        self.assertTrue(list((self.directory / '.runtime/runs/method-runs').glob('run-*/script.py')))
+        self.assertFalse((self.directory / 'method-runs').exists())
         self.assertEqual(call_method(self.directory, 'custom_sum', {'text': '101+203'}), '304')
         self.assertEqual(custom_catalog(self.directory)[0]['source'], SUM_RULE)
         self.assertFalse((self.directory / 'task.py').exists())

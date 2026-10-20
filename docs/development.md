@@ -4,7 +4,7 @@
 
 本仓库是唯一宿主开发来源，只包含宿主、文档、宿主测试和构建脚本。`tasks/` 和 `test_tasks/` 仅为本地技能运行目录，均不提交 Git。公开技能在独立仓库维护；内部技能与私有测试素材另行保存。运行环境、共享组件下载、日志和验证产物也不提交 Git。
 
-宿主的 `src/huanzhizhi/games/` 包含扫雷、围棋公共模块，接口与示例见[共享游戏开发说明](../src/huanzhizhi/game_examples.md)。公共模块不依赖开发目录或其他技能；只同步公共代码及独立测试，不复制扫雷、围棋技能或引擎模型。修改公共代码后需要重新构建完整包，原有 ZIP 不会自动更新。
+宿主的 `src/huanzhizhi/games/` 包含扫雷、围棋、象棋公共模块，接口与示例见[共享游戏开发说明](../src/huanzhizhi/game_examples.md)。公共模块不依赖开发目录或其他技能；只同步公共代码及独立测试，不复制具体技能或引擎模型。修改公共代码后需要重新构建完整包，原有 ZIP 不会自动更新。
 
 使用 Windows Python 3.11 x64 准备环境，当前基线是 3.11.9：
 
@@ -46,7 +46,7 @@ Windows 原生窗口恢复测试需要 `QT_QPA_PLATFORM=windows`，无界面测�
 .\python\python.exe -X utf8 scripts/verify_package.py build/portable-0.2.0 --report-dir artifacts/portable-check
 ```
 
-完整包默认不附带技能。显式指定技能时，仅打包其运行代码、素材和说明。完整包与单技能更新共用 `task_ignore` 规则，排除技能 `tests/` 和 Python 缓存，运行素材正常复制。不复制 `test_tasks/`、本机外部引擎/模型、历史日志或草稿；`dependencies/` 仅附 README。`LICENSE`、`licenses/`、文档和 AI 开发知识随包复制。`build-info.json` 记录版本、依赖、技能及宿主/运行环境校验值。
+完整包默认不附带技能。显式指定技能时，仅打包其运行代码、素材和说明。完整包与单技能更新共用 `task_ignore` 规则，排除技能根目录 `.runtime/`、`tests/` 和 Python 缓存，运行素材正常复制。不复制 `test_tasks/`、本机外部引擎/模型、历史日志或草稿；`dependencies/` 仅附 README。`LICENSE`、`licenses/`、文档和 AI 开发知识随包复制。`build-info.json` 记录版本、依赖、技能及宿主/运行环境校验值。
 
 现有代码仅处理静态截图，发行包排除 OpenCV 的 FFmpeg 视频插件及可选 Mesa 软件 OpenGL 渲染器；不承诺这两项可选能力。
 
@@ -73,7 +73,7 @@ Qt 过滤规则同时用于复制和兼容性指纹，因此未分发的开发�
 .\python\python.exe -X utf8 scripts/verify_package.py build/portable-0.2.0 --updates build/brick-update-0.2.0 --report-dir artifacts/update-check
 ```
 
-更新验证在报告目录的副本上执行，不修改基础包。用户先停止技能并备份旧目录，再整体替换新目录；旧 PyInstaller 包需要完整升级。宿主或公共依赖有变化时重新发布完整包。
+更新验证在报告目录的副本上执行，不修改基础包。用户先停止技能并备份旧目录，再替换运行文件并保留原技能 `.runtime/`，不要用更新包覆盖本机运行状态；旧 PyInstaller 包需要完整升级。宿主或公共依赖有变化时重新发布完整包。
 
 ## 发布前
 

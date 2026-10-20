@@ -34,6 +34,8 @@ class SkillVersionTests(unittest.TestCase):
                 'emit({"type": "preview",', '# emit({"type": "preview",'), encoding='utf-8')
             write_skill_manifest(directory / 'task.py', name='演示任务')
             (directory/'version.txt').write_text(version)
+            (directory / '.runtime/state').mkdir(parents=True)
+            (directory / '.runtime/state/checkpoint.json').write_text(version)
         assets = Path(__file__).resolve().parents[1]/'src/huanzhizhi/assets'
         self.pet = create_test_pet()
         self.settings = SettingsComponent(self.root/'settings.ini')
@@ -159,6 +161,9 @@ class SkillVersionTests(unittest.TestCase):
         for entry, name in ((formal, '旧版'), (test, '新版')):
             entry.write_bytes(name.encode('utf-8'))
             write_skill_manifest(entry, name=name)
+            runtime = entry.parent / '.runtime' / entry.stem
+            runtime.mkdir(parents=True)
+            (runtime / 'state.json').write_text(name, encoding='utf-8')
         self.host.reload_tasks()
         previous = skill_files(formal)
         replacement = skill_files(test)
@@ -170,8 +175,12 @@ class SkillVersionTests(unittest.TestCase):
         self.assertEqual(skill_files(backup), previous)
         self.host.demote_task('compiled')
         self.assertEqual(skill_files(test), replacement)
+        self.assertFalse((formal.parent / '.runtime' / formal.stem).exists())
         self.assertEqual(self.host.catalog.get('test/compiled').name, 'compiled')
         self.assertEqual(self.host.catalog.signature(), self.host.catalog.loaded_signature)
+        self.host.set_task_preferences('test/compiled', name='改名', description='', show_logs=True)
+        self.assertEqual((test.parent / '.runtime/task-改名/state.json').read_text(encoding='utf-8'), '新版')
+        self.assertFalse((test.parent / '.runtime' / test.stem).exists())
 
     def test_failed_compiled_manifest_move_restores_both_versions(self):
         formal = self.root/'tasks/task-compiled.exe'
@@ -179,6 +188,9 @@ class SkillVersionTests(unittest.TestCase):
         for entry, name in ((formal, '旧版'), (test, '新版')):
             entry.write_bytes(name.encode('utf-8'))
             write_skill_manifest(entry, name=name)
+            runtime = entry.parent / '.runtime' / entry.stem
+            runtime.mkdir(parents=True)
+            (runtime / 'state.json').write_text(name, encoding='utf-8')
         self.host.reload_tasks()
         before = skill_files(formal), skill_files(test)
         rename = Path.rename

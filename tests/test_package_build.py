@@ -28,6 +28,10 @@ class PackageBuildTests(unittest.TestCase):
         (self.root / "tasks/demo/assets/version.txt").write_text("v1", encoding="utf-8")
         (self.root / "tasks/demo/tests").mkdir()
         (self.root / "tasks/demo/tests/sample.png").write_bytes(b"private test sample")
+        (self.root / "tasks/demo/.runtime/state").mkdir(parents=True)
+        (self.root / "tasks/demo/.runtime/state/checkpoint.json").write_bytes(b"private state")
+        (self.root / "tasks/demo/assets/.runtime").mkdir()
+        (self.root / "tasks/demo/assets/.runtime/reference.png").write_bytes(b"asset")
         shutil.copytree(self.root, self.bundle)
         self.manifest = {"format": FORMAT, "runtime_sha256": fingerprint_tree(self.root / "python"),
                          "host_sha256": fingerprint_tree(self.root / "src")}
@@ -95,6 +99,8 @@ class PackageBuildTests(unittest.TestCase):
         self.assertEqual({p.name for p in output.iterdir()}, {"tasks", "update-info.json"})
         self.assertEqual((output / "tasks/demo/assets/version.txt").read_text(encoding="utf-8"), "v1")
         self.assertFalse((output / "tasks/demo/tests").exists())
+        self.assertFalse((output / "tasks/demo/.runtime").exists())
+        self.assertEqual((output / "tasks/demo/assets/.runtime/reference.png").read_bytes(), b"asset")
         self.assertEqual(json.loads((output / "update-info.json").read_text())["task"], "demo")
         self.assertEqual(fingerprint_tree(self.bundle), before)
 
@@ -139,6 +145,7 @@ class PackageBuildTests(unittest.TestCase):
         self.assertEqual((output / "dependencies/README.md").read_text(encoding="utf-8"), "用户自行准备组件")
         self.assertEqual(fingerprint_tree(dependencies), before)
         self.assertFalse((output / "tasks/demo/tests").exists())
+        self.assertFalse((output / "tasks/demo/.runtime").exists())
         self.assertTrue((output / "tasks/demo/assets/version.txt").is_file())
         self.assertEqual((output / "LICENSE").read_text(), "fixture")
         self.assertEqual((output / "幻之之.exe").read_bytes(), b"launcher")

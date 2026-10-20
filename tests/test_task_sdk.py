@@ -15,6 +15,40 @@ from huanzhizhi.tasks.protocol import parse_event_line
 
 
 class TaskSdkTests(unittest.TestCase):
+    def test_runtime_directory_is_local_lazy_and_survives_rename(self):
+        from huanzhizhi.task_sdk import runtime_directory
+        script = self._write_script('''
+            from huanzhizhi.task_sdk import TaskSession, runtime_directory
+            session = TaskSession(__file__)
+            assert session.runtime_dir == runtime_directory(__file__)
+            state = session.runtime_dir / 'state'
+            state.mkdir(parents=True, exist_ok=True)
+            checkpoint = state / 'checkpoint.txt'
+            if not checkpoint.exists():
+                checkpoint.write_text('saved state')
+            session.emit_finished('完成', checkpoint.read_text(), str(session.runtime_dir))
+        ''', task_id='runtime')
+        expected = script.resolve().parent / '.runtime'
+        self.assertEqual(runtime_directory(script), expected)
+        self.assertFalse(expected.exists())
+        for entry in (script, script.parent.with_name('新名称') / 'task.py'):
+            if entry != script:
+                script.parent.rename(entry.parent)
+            start = self._json_line(dict(protocol_version=1, type='start', task_id=entry.parent.name, options={}))
+            result = self._run_with_open_stdin(entry, start)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['title'], 'saved state')
+            self.assertEqual(Path(json.loads(result.stdout)['detail']), entry.resolve().parent / '.runtime')
+
+    def test_legacy_executables_have_separate_runtime_directories(self):
+        from huanzhizhi.task_sdk import runtime_directory
+        executable = self.root / 'task-first.exe'
+        with patch.object(sys, 'frozen', True, create=True), patch.object(sys, 'executable', str(executable)):
+            self.assertEqual(runtime_directory(self.root / 'unpacked/task.py'),
+                             self.root.resolve() / '.runtime/task-first')
+        self.assertNotEqual(runtime_directory(executable), runtime_directory(self.root / 'task-second.exe'))
+        self.assertFalse((self.root / '.runtime').exists())
+
     def test_renamed_directory_starts_with_new_protocol_identity(self):
         script = self._write_script('''
             from huanzhizhi.task_sdk import TaskSession

@@ -40,7 +40,8 @@ def build_package(root, output, *, tasks=DEFAULT_TASKS, task=None, base_bundle=N
         stage = Path(temporary) / "bundle"
         (stage / "tasks").mkdir(parents=True)
         for task_id, directory in directories:
-            shutil.copytree(directory, stage / "tasks" / task_id, ignore=task_ignore)
+            shutil.copytree(directory, stage / "tasks" / task_id,
+                            ignore=lambda current, names: task_ignore(current, names, skill_root=directory))
         if not task:
             shutil.copytree(root / "python", stage / "python", ignore=runtime_ignore)
             shutil.copytree(root / "src", stage / "src", ignore=ignore)

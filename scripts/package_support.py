@@ -17,8 +17,11 @@ QT_MODULES = {"Core", "Gui", "Widgets", "Svg", "SvgWidgets", "Network",
               "OpenGL", "OpenGLWidgets", "PrintSupport", "Test"}
 
 
-def task_ignore(directory, names):
-    return shutil.ignore_patterns("tests", "__pycache__", "*.pyc", "*.pyo", "*.egg-info")(directory, names)
+def task_ignore(directory, names, *, skill_root):
+    ignored = set(shutil.ignore_patterns("tests", "__pycache__", "*.pyc", "*.pyo", "*.egg-info")(directory, names))
+    if Path(directory) == skill_root:
+        ignored.update(name for name in names if name.casefold() == ".runtime")
+    return ignored
 
 
 def runtime_ignore(directory, names):

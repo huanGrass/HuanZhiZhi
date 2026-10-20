@@ -13,6 +13,7 @@ from huanzhizhi.widgets import SCROLLBAR_STYLE, TOOL_BUTTON_STYLE
 
 from huanzhizhi.platform.window_policy import WindowPolicy
 from huanzhizhi.platform.target_window import DesktopWindowsError, Win32DesktopApi, WindowInfo
+from huanzhizhi.platform.window_capture import WgcWindowCapture
 from huanzhizhi.skill_creation import CreationWorker
 from huanzhizhi.settings.component import SettingsError
 from huanzhizhi.pet.exploration_conversation import ExplorationConversation
@@ -65,6 +66,75 @@ def _window_icon(hwnd: int) -> QtGui.QIcon:
     return fallback
 
 
+_PREVIEW_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+
+
+class _WindowPreviews(QtCore.QThread):
+    ready = QtCore.Signal(int, int, QtGui.QImage)
+
+    def __init__(self, windows, generation, parent):
+        super().__init__(parent)
+        self.windows = windows
+        self.generation = generation
+
+    def run(self):
+        capture = WgcWindowCapture()
+        try:
+            api = Win32DesktopApi(capture=capture, configure_dpi_awareness=False)
+            for window in self.windows:
+                if self.isInterruptionRequested():
+                    break
+                try:
+                    frame = api.capture_client(window).convert('RGB')
+                    frame.thumbnail((480, 300))
+                    image = QtGui.QImage(frame.tobytes(), frame.width, frame.height,
+                                         frame.width * 3, QtGui.QImage.Format.Format_RGB888).copy()
+                except Exception:
+                    image = QtGui.QImage()  # Closed/minimized/protected windows retain their icon.
+                if not self.isInterruptionRequested():
+                    self.ready.emit(self.generation, window.hwnd, image)
+        finally:
+            capture.close()
+
+
+class _WindowCardDelegate(QtWidgets.QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        hover = bool(option.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+        bounds = QtCore.QRectF(option.rect).adjusted(3, 3, -3, -3)
+        painter.setPen(QtGui.QPen(QtGui.QColor('#ac8bce' if selected else '#e7e2ed'), 1))
+        painter.setBrush(QtGui.QColor('#f1e9fa' if selected else '#faf7fe' if hover else '#fffefd'))
+        painter.drawRoundedRect(bounds, 10, 10)
+        preview = bounds.adjusted(7, 7, -7, -38)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor('#f2eff5'))
+        painter.drawRoundedRect(preview, 5, 5)
+        image = index.data(_PREVIEW_ROLE)
+        if isinstance(image, QtGui.QImage) and not image.isNull():
+            size = image.size().scaled(preview.size().toSize(), QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+            rect = QtCore.QRectF(QtCore.QPointF(), QtCore.QSizeF(size))
+            rect.moveCenter(preview.center())
+            painter.drawImage(rect, image)
+        else:
+            icon = index.data(QtCore.Qt.ItemDataRole.DecorationRole)
+            icon.paint(painter, QtCore.QRect(int(preview.center().x()-14), int(preview.center().y()-25), 28, 28))
+            painter.setPen(QtGui.QColor('#827b8e'))
+            painter.setFont(option.font)
+            painter.drawText(preview.adjusted(0, 32, 0, 0),
+                             QtCore.Qt.AlignmentFlag.AlignCenter,
+                             '预览不可用' if image is not None else '正在加载…')
+        title_rect = bounds.adjusted(9, bounds.height()-31, -9, -7)
+        painter.setPen(QtGui.QColor('#62418a' if selected else '#332e40'))
+        painter.setFont(option.font)
+        painter.drawText(title_rect, QtCore.Qt.AlignmentFlag.AlignVCenter,
+                         option.fontMetrics.elidedText(index.data(), QtCore.Qt.TextElideMode.ElideRight,
+                                                        int(title_rect.width())))
+        painter.restore()
+
+
 class ChatWindow(QtWidgets.QWidget):
     expanded_changed = QtCore.Signal(bool)
     drag_started = QtCore.Signal(QtCore.QPoint)
@@ -88,8 +158,8 @@ class ChatWindow(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMouseTracking(True)
-        self.setMinimumSize(320, 300)
-        self.resize(400, 520)
+        self.setMinimumSize(320, 400)
+        self.resize(400, 580)
         self._window_policy = WindowPolicy(self)
         self._pet_rect: QtCore.QRect | None = None
         self._drag = None
@@ -132,6 +202,9 @@ class ChatWindow(QtWidgets.QWidget):
         self._editing_skill = None
         self._editing_name = ''
         self._choosing_window = True
+        self._preview_worker = None
+        self._preview_pending = ()
+        self._preview_generation = 0
         self.setStyleSheet(TOOL_BUTTON_STYLE + SCROLLBAR_STYLE + '''
             QWidget { font-family: "Microsoft YaHei UI"; font-size: 13px; color: #332e40; }
             QFrame#creationCard { background: #fffefd; border: 1px solid #e7e2ed; border-radius: 18px; }
@@ -142,12 +215,15 @@ class ChatWindow(QtWidgets.QWidget):
             QPushButton#primary { background: #8158b4; color: white; border: none; font-weight: 600; }
             QPushButton#primary:hover { background: #7249a6; }
             QPushButton#primary:disabled { background: #eeeaf2; color: #a49bac; }
+            QRadioButton { background: #faf8fc; border: 1px solid #e7e2ed;
+                           border-radius: 9px; padding: 10px 8px; }
+            QRadioButton:checked { color: #62418a; background: #f1e9fa; border-color: #b395d3; }
+            QRadioButton::indicator { width: 14px; height: 14px; border-radius: 8px;
+                                      border: 1px solid #b6a9c6; background: #fffefd; }
+            QRadioButton::indicator:checked { border-color: #8158b4; background: #8158b4; }
             QFrame#targetSummary { background: #f6f4f8; border: none; border-radius: 8px; }
             QScrollArea, QStackedWidget { border: none; background: transparent; }
             QListWidget { border: none; background: transparent; outline: none; }
-            QListWidget::item { padding: 6px 10px; border-radius: 8px; border: 1px solid transparent; }
-            QListWidget::item:hover { background: #f8f5fb; }
-            QListWidget::item:selected { background: #f1e9fa; border-color: #d8c5ed; color: #62418a; }
             QPlainTextEdit { background: #f9f7fb; border: 1px solid #e9e3f0; border-radius: 9px; padding: 8px; }
             QPlainTextEdit:focus { border-color: #b395d3; }
         ''')
@@ -210,28 +286,47 @@ class ChatWindow(QtWidgets.QWidget):
         self.window_list = QtWidgets.QListWidget()
         self.window_list.setMinimumHeight(80)
         self.window_list.setIconSize(QtCore.QSize(26, 26))
-        self.window_list.setSpacing(3)
+        self.window_list.setViewMode(QtWidgets.QListView.ViewMode.IconMode)
+        self.window_list.setMovement(QtWidgets.QListView.Movement.Static)
+        self.window_list.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
+        self.window_list.setSpacing(0)
+        self.window_list.setItemDelegate(_WindowCardDelegate(self.window_list))
         self.window_list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.window_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.window_list.setAccessibleName('可选目标窗口')
         self.window_list.currentItemChanged.connect(
             lambda current, previous: self.select_window_button.setEnabled(current is not None))
-        self.window_list.itemDoubleClicked.connect(lambda item: self._select_window())
         window_layout.addWidget(self.window_list, 1)
         self.pages.addWidget(self.window_page)
 
         self.window_footer = QtWidgets.QWidget()
-        window_actions = QtWidgets.QHBoxLayout(self.window_footer)
+        window_actions = QtWidgets.QVBoxLayout(self.window_footer)
         window_actions.setContentsMargins(0, 0, 0, 0)
-        self.select_window_button = QtWidgets.QPushButton('下一步 →')
+        window_actions.setSpacing(7)
+        modes = QtWidgets.QHBoxLayout()
+        modes.setSpacing(8)
+        self.observe_option = QtWidgets.QRadioButton('AI先看看')
+        self.manual_option = QtWidgets.QRadioButton('自己说需求')
+        modes.addWidget(self.observe_option, 1)
+        modes.addWidget(self.manual_option, 1)
+        window_actions.addLayout(modes)
+        self.mode_hint = QtWidgets.QLabel()
+        self.mode_hint.setObjectName('muted')
+        self.mode_hint.setWordWrap(True)
+        window_actions.addWidget(self.mode_hint)
+        self.select_window_button = QtWidgets.QPushButton()
         self.select_window_button.setObjectName('primary')
         self.select_window_button.setEnabled(False)
         self.select_window_button.clicked.connect(self._select_window)
         self.no_window_button = QtWidgets.QPushButton('无需窗口，直接创建')
+        self.no_window_button.setStyleSheet(
+            'QPushButton { border: none; padding: 3px; color: #827b8e; font-size: 12px; }'
+            'QPushButton:hover { color: #62418a; background: #faf7fe; }')
         self.no_window_button.clicked.connect(self._create_without_window)
-        window_actions.addWidget(self.no_window_button)
-        window_actions.addStretch()
         window_actions.addWidget(self.select_window_button)
+        window_actions.addWidget(self.no_window_button)
+        self.observe_option.toggled.connect(self._update_creation_mode)
+        self.observe_option.setChecked(True)
         card_layout.addWidget(self.window_footer)
         self._drag_surfaces = (self.header, self.card, self.window_page, self.pages, self.window_footer)
         for surface in self._drag_surfaces:
@@ -258,6 +353,7 @@ class ChatWindow(QtWidgets.QWidget):
         self.conversation.dismissed.connect(self._cancel_initial_message)
         self.conversation.dismissed.connect(lambda: self.toggle_button.setText('修改技能' if self._editing_skill else '探索对话'))
         self.destroyed.connect(self.conversation.deleteLater)
+        self.window_list.viewport().installEventFilter(self)
         self.refresh_model_name()
 
 
@@ -276,7 +372,8 @@ class ChatWindow(QtWidgets.QWidget):
         api = Win32DesktopApi(configure_dpi_awareness=False)
         return tuple(window for window in api.list_windows() if window.hwnd not in own_handles)
 
-    def _refresh_windows(self) -> None:
+    def _refresh_windows(self, *, previews=True) -> None:
+        self._cancel_previews()
         previous = self.window_list.currentItem()
         previous_hwnd = previous.data(QtCore.Qt.ItemDataRole.UserRole).hwnd if previous else None
         self.window_list.clear()
@@ -291,12 +388,55 @@ class ChatWindow(QtWidgets.QWidget):
         self.window_status.setText(f'{len(windows)} 个可选窗口' if windows else '没有找到可选窗口，可直接创建；需要操作应用时，请打开应用后刷新。')
         for window in windows:
             item = QtWidgets.QListWidgetItem(_window_icon(window.hwnd), window.title)
-            item.setSizeHint(QtCore.QSize(0, 52))
             item.setToolTip(f'{window.title}\n{window.width} × {window.height}')
             item.setData(QtCore.Qt.ItemDataRole.UserRole, window)
             self.window_list.addItem(item)
             if window.hwnd == previous_hwnd:
                 self.window_list.setCurrentItem(item)
+        self._resize_window_cards()
+        self._preview_pending = windows
+        if previews:
+            self._start_previews()
+
+    def _resize_window_cards(self):
+        # Reserve scrollbar space even while hidden, so wrapping cannot toggle it.
+        width = max(1, (self.window_list.contentsRect().width()
+                        - self.window_list.verticalScrollBar().sizeHint().width()-2) // 2)
+        size = QtCore.QSize(width, round((width-20)*.625)+44)
+        self.window_list.setGridSize(size)
+        for index in range(self.window_list.count()):
+            self.window_list.item(index).setSizeHint(size)
+
+    def _cancel_previews(self):
+        self._preview_generation += 1
+        self._preview_pending = ()
+        if self._preview_worker is not None:
+            self._preview_worker.requestInterruption()
+
+    def _start_previews(self):
+        if self._preview_worker is not None or not self._preview_pending or not self.expanded:
+            return
+        worker = _WindowPreviews(self._preview_pending, self._preview_generation, self)
+        self._preview_pending = ()
+        self._preview_worker = worker
+        worker.ready.connect(self._preview_ready)
+        worker.finished.connect(self._previews_finished)
+        worker.start()
+
+    def _preview_ready(self, generation, hwnd, image):
+        if generation != self._preview_generation:
+            return
+        for index in range(self.window_list.count()):
+            item = self.window_list.item(index)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole).hwnd == hwnd:
+                item.setData(_PREVIEW_ROLE, image)
+                break
+
+    def _previews_finished(self):
+        worker = self._preview_worker
+        self._preview_worker = None
+        worker.deleteLater()
+        self._start_previews()
 
     def _create_without_window(self) -> None:
         if self._exploration is not None:
@@ -307,6 +447,12 @@ class ChatWindow(QtWidgets.QWidget):
         self._editing_skill = None
         self._show_chat()
 
+    def _update_creation_mode(self):
+        observe = self.observe_option.isChecked()
+        self.select_window_button.setText('AI先看看 →' if observe else '输入需求 →')
+        self.mode_hint.setText('分析所选窗口，推荐可创建的技能。' if observe else
+                               '进入对话，描述你想完成的事。')
+
     def _select_window(self) -> None:
         if self._exploration is not None:
             return
@@ -315,7 +461,7 @@ class ChatWindow(QtWidgets.QWidget):
             return
         selected = item.data(QtCore.Qt.ItemDataRole.UserRole)
         # A listed window may have closed while the user was choosing it.
-        self._refresh_windows()
+        self._refresh_windows(previews=False)
         for index in range(self.window_list.count()):
             fresh = self.window_list.item(index).data(QtCore.Qt.ItemDataRole.UserRole)
             if fresh.hwnd == selected.hwnd:
@@ -324,14 +470,20 @@ class ChatWindow(QtWidgets.QWidget):
                 except DesktopWindowsError as error:
                     self.window_status.setText('无法恢复所选窗口，请手动打开后重试。')
                     self.window_status.setToolTip(str(error))
+                    self._start_previews()
                     return
-                if self.target_window is None or fresh.hwnd != self.target_window.hwnd or self._saved_skill:
+                observe = self.observe_option.isChecked()
+                if (self.target_window is None or fresh.hwnd != self.target_window.hwnd or self._saved_skill
+                        or (observe and any(entry['role'] == 'user' for entry in self.conversation.entries))):
                     self._reset_conversation()
                 self.target_window = fresh
                 self._show_chat()
+                if observe:
+                    self._observe_window()
                 return
         if not self.window_status.toolTip():
             self.window_status.setText('这个窗口已不可用，请重新选择。')
+        self._start_previews()
 
     def _reset_conversation(self) -> None:
         if self._exploration is not None:
@@ -394,6 +546,7 @@ class ChatWindow(QtWidgets.QWidget):
             self.ai_unavailable.emit(str(exc))
             return
         self._cancel_initial_message()
+        self.conversation.set_suggestions([])
         self.conversation.add_message('user', text)
         self._work_view = 'conversation'
         if self._editing_skill and self._saved_skill:
@@ -403,14 +556,38 @@ class ChatWindow(QtWidgets.QWidget):
                                 directory=self._creation_directory, thread_id=self._creation_thread_id,
                                 source_skill=self._editing_skill,
                                 settings_path=self._settings.path)
+        self._pending_initial_message = (
+            worker, self.conversation.entries[-1], f'收到，{model_name}正在处理')
+        self.conversation.input.clear()
+        self._start_exploration(worker, model_name)
+        self._initial_message_timer.start()
+
+    def _observe_window(self) -> None:
+        if (self._exploration is not None or self.target_window is None or self._editing_skill
+                or any(entry['role'] == 'user' for entry in self.conversation.entries)):
+            return
+        if not self.can_start():
+            self.conversation.add_message('assistant', '已有任务正在运行，请先停止该任务。')
+            return
+        try:
+            self._require_ai_enabled()
+            _, model_name = self._configured_model_name()
+        except Exception as error:
+            self.log_message.emit(f'读取 AI 设置失败：{error}')
+            self.ai_unavailable.emit(str(error))
+            return
+        worker = CreationWorker(self.target_window, '', self, tasks_root=self.tasks_root,
+                                settings_path=self._settings.path, observe_only=True)
+        self.conversation.set_suggestions([])
+        self.conversation.add_message('assistant', '正在查看所选窗口，整理可创建的技能建议。')
+        self._start_exploration(worker, model_name)
+
+    def _start_exploration(self, worker, model_name) -> None:
         self._exploration = worker
         self.conversation.set_model_name(model_name)
         self._saved_skill = None
         self.exploration_active.emit(True)
         self._exploration_stopping = False
-        self._pending_initial_message = (
-            worker, self.conversation.entries[-1], f'收到，{model_name}正在处理')
-        self.conversation.input.clear()
         self.conversation.set_busy(True)
         self.return_button.setEnabled(False)
         worker.progress.connect(self._exploration_progress)
@@ -418,14 +595,19 @@ class ChatWindow(QtWidgets.QWidget):
         worker.input_request.connect(self._exploration_input_request)
         worker.input_cancel.connect(self.foreground_input_cancelled)
         worker.observed.connect(self._show_observation)
+        worker.suggestions_ready.connect(self._show_suggestions)
         worker.failed.connect(self._exploration_failed)
         worker.configuration_failed.connect(self._configuration_failed)
         worker.saved.connect(self._skill_saved)
         worker.log_message.connect(self.log_message)
         worker.finished.connect(self._exploration_finished)
         self.conversation.follow_pet(self._pet_rect)
-        self._initial_message_timer.start()
         worker.start()
+
+    def _show_suggestions(self, observation) -> None:
+        if self._exploration is self.sender() and not self._exploration_stopping:
+            self.conversation.add_message('assistant', observation['summary'])
+            self.conversation.set_suggestions(observation['suggestions'])
 
     def _configured_model_name(self) -> tuple[str, str]:
         if self._settings.get_agent_tool() == 'opencode':
@@ -537,13 +719,16 @@ class ChatWindow(QtWidgets.QWidget):
         elif self._exploration_stopping:
             self.conversation.add_message('assistant',
                                           '已停止，保存的技能可在任务列表试运行。' if self._saved_skill
-                                          else ('已停止修改，原技能未替换。可以补充要求后继续。' if self._editing_skill else '已停止创建。可以补充目标后继续。'))
+                                          else ('已停止查看窗口，可以手动输入目标继续。' if worker.observe_only is True else
+                                                '已停止修改，原技能未替换。可以补充要求后继续。' if self._editing_skill
+                                                else '已停止创建。可以补充目标后继续。'))
         self._creation_directory = worker.directory
         self._creation_thread_id = worker.thread_id
         if (not worker.thread_id and worker.directory and any(worker.directory.glob('turn_*'))
                 and not (worker.directory / 'creation_flow.json').exists()):
             # A failed launch cannot be resumed; keep its files but use a fresh draft next time.
-            self._creation_directory = None
+            if not (worker.directory / 'observation.json').exists():
+                self._creation_directory = None
         self._exploration = None
         worker.deleteLater()
         self.return_button.setEnabled(True)
@@ -552,6 +737,9 @@ class ChatWindow(QtWidgets.QWidget):
         self.refresh_model_name()
 
     def stop_exploration_and_wait(self) -> None:
+        self._cancel_previews()
+        if self._preview_worker is not None:
+            self._preview_worker.wait()
         self._cancel_initial_message()
         if self._exploration is not None:
             self._exploration_stopping = True
@@ -645,6 +833,7 @@ class ChatWindow(QtWidgets.QWidget):
         self._settings.require_ai_enabled()
 
     def collapse(self) -> None:
+        self._cancel_previews()
         if not self.expanded:
             return
         self._finish_drag()
@@ -762,6 +951,8 @@ class ChatWindow(QtWidgets.QWidget):
             self.follow_pet(self._pet_rect)
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if watched is self.window_list.viewport() and event.type() == QtCore.QEvent.Type.Resize:
+            self._resize_window_cards()
         if watched in self._drag_surfaces:
             if (event.type() == QtCore.QEvent.Type.MouseButtonPress
                     and event.button() == QtCore.Qt.MouseButton.LeftButton
