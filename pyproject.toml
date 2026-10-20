@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "huanzhizhi"
-version = "0.2.0"
+version = "0.2.1"
 description = "幻之之 极简桌宠任务助手"
 readme = "README.md"
 license = {file = "LICENSE"}
