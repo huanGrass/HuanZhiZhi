@@ -12,6 +12,7 @@ from PySide6 import QtCore
 
 from huanzhizhi.agents.runtime import SettingsError
 from huanzhizhi.agents.opencode import adapter as ai_opencode
+from huanzhizhi.agents.deepseek import adapter as ai_deepseek
 from huanzhizhi.agents.codex.adapter import (
     DEFAULT_CODEX_OPTIONS, CODEX_REASONING_EFFORTS, codex_executable,
     check_codex_configuration, validate_options,
@@ -27,6 +28,7 @@ _PET_Y_KEY = "desktopPetIdleY"
 _DISPLAY_SCALE_KEY = "desktopPetScale"
 _MOUSE_POINT_VISIBLE_KEY = "desktopPetMouseClickVisible"
 _RUNTIME_TRANSPARENT_KEY = "desktopPetRuntimeTransparent"
+_RUNTIME_TRANSPARENCY_KEY = "desktopPetRuntimeTransparency"
 _INPUT_MODE_KEY = "inputMode"
 _PET_THEME_KEY = "desktopPetTheme"
 _SOUND_ENABLED_KEY = "desktopPetSoundEnabled"
@@ -57,12 +59,12 @@ class SettingsComponent:
                     pass
             self._settings.setValue('aiEnabled', enabled)
         # Retired tool selections must not silently start Codex with AI enabled.
-        if self._settings.value('agentTool', 'codex') not in ('codex', 'opencode'):
+        if self._settings.value('agentTool', 'codex') not in ('codex', 'opencode', 'deepseek'):
             self._settings.setValue('aiEnabled', False)
             self._settings.remove('agentTool')
         if self._settings.value('agentTool') == 'codex':
             self._settings.remove('agentTool')
-        for key in ('deepseekOptions', 'codebuddyOptions', 'traeOptions', 'qwenOptions', 'kimiOptions', 'cursorOptions'):
+        for key in ('codebuddyOptions', 'traeOptions', 'qwenOptions', 'kimiOptions', 'cursorOptions'):
             self._settings.remove(key)
 
     @property
@@ -82,10 +84,18 @@ class SettingsComponent:
             if not isinstance(models, list):
                 return []
             for model in models:
-                if (set(model) != {'id', 'name', 'image'} or model['image'] is not True or
+                if (set(model) != {'id', 'name', 'image', 'efforts'} or model['image'] is not True or
                         not isinstance(model['name'], str) or not model['id']):
                     return []
                 ai_opencode.validate_options({'executable': '', 'model': model['id']})
+                if not isinstance(model['efforts'], list):
+                    return []
+                for effort in model['efforts']:
+                    ai_opencode.validate_options(dict(executable='', model=model['id'], reasoning_effort=effort))
+                    if not effort:
+                        return []
+                if len(set(model['efforts'])) != len(model['efforts']):
+                    return []
             return models
         except (ValueError, KeyError, TypeError, SettingsError):
             return []
@@ -95,7 +105,8 @@ class SettingsComponent:
         self._open_settings().setValue('opencodeModelCache', json.dumps({
             'executable': self.get_opencode_options()['executable'],
             'updated': time.time(),
-            'models': [{'id': model['id'], 'name': model['name'], 'image': True}
+            'models': [{'id': model['id'], 'name': model['name'], 'image': True,
+                        'efforts': list(model.get('efforts', []))}
                        for model in models if model['image'] is True],
         }))
 
@@ -113,6 +124,8 @@ class SettingsComponent:
         self._set_boolean('aiEnabled', enabled)
 
     def check_agent_configuration(self):
+        if self.get_agent_tool() == 'deepseek':
+            return ai_deepseek.check_configuration(self.get_deepseek_options())
         if self.get_agent_tool() == 'opencode':
             options = self.get_opencode_options()
             if not self.is_opencode_verified():
@@ -122,12 +135,12 @@ class SettingsComponent:
 
     def get_agent_tool(self):
         tool = self._open_settings().value('agentTool', 'codex')
-        if tool not in ('codex', 'opencode'):
+        if tool not in ('codex', 'opencode', 'deepseek'):
             raise SettingsError('未知 AI 工具。')
         return tool
 
     def set_agent_tool(self, tool):
-        if tool not in ('codex', 'opencode'):
+        if tool not in ('codex', 'opencode', 'deepseek'):
             raise SettingsError('未知 AI 工具。')
         if self.ai_work_active():
             raise SettingsError('AI 正在工作，请先停止后切换工具。')
@@ -141,12 +154,27 @@ class SettingsComponent:
         except (ValueError, TypeError) as error:
             raise SettingsError('OpenCode 配置无效，请重新配置。') from error
         ai_opencode.validate_options(options)
+        return dict(ai_opencode.DEFAULT_OPTIONS, **options)
+
+    def get_deepseek_options(self):
+        try:
+            options = json.loads(self._open_settings().value('deepseekOptions', json.dumps(ai_deepseek.DEFAULT_OPTIONS)))
+        except (ValueError, TypeError) as error:
+            raise SettingsError('DeepSeek Harness 配置无效，请重新配置。') from error
+        ai_deepseek.validate_options(options)
         return options
+
+    def set_deepseek_options(self, options):
+        if self.ai_work_active():
+            raise SettingsError('AI 正在工作，请先停止后修改配置。')
+        ai_deepseek.validate_options(options)
+        self._open_settings().setValue('deepseekOptions', json.dumps(options, ensure_ascii=False))
 
     def set_opencode_options(self, options):
         if self.ai_work_active():
             raise SettingsError('AI 正在工作，请先停止后修改配置。')
         ai_opencode.validate_options(options)
+        options = dict(ai_opencode.DEFAULT_OPTIONS, **options)
         if options != self.get_opencode_options():
             self.clear_opencode_verification()
         self._open_settings().setValue('opencodeOptions', json.dumps(options))
@@ -159,12 +187,19 @@ class SettingsComponent:
             self._set_boolean('aiEnabled', False)
 
     def mark_opencode_verified(self, options):
+        ai_opencode.validate_options(options)
+        options = dict(ai_opencode.DEFAULT_OPTIONS, **options)
         if self.ai_work_active() or options != self.get_opencode_options():
             raise SettingsError('配置已变化，请重新进行连接测试。')
         self._open_settings().setValue('opencodeVerifiedOptions', json.dumps(options, sort_keys=True))
 
     def is_opencode_verified(self):
-        return self._open_settings().value('opencodeVerifiedOptions') == json.dumps(self.get_opencode_options(), sort_keys=True)
+        try:
+            verified = json.loads(self._open_settings().value('opencodeVerifiedOptions', 'null'))
+            ai_opencode.validate_options(verified)
+        except (ValueError, TypeError, SettingsError):
+            return False
+        return dict(ai_opencode.DEFAULT_OPTIONS, **verified) == self.get_opencode_options()
 
     def get_codex_options(self) -> dict[str, str]:
         raw = self._open_settings().value("codexOptions", json.dumps(DEFAULT_CODEX_OPTIONS))
@@ -231,27 +266,37 @@ class SettingsComponent:
     def set_mouse_point_visible(self, visible: bool) -> None:
         self._set_boolean(_MOUSE_POINT_VISIBLE_KEY, visible)
 
-    def get_runtime_transparent(self) -> bool:
-        return self._read_boolean(_RUNTIME_TRANSPARENT_KEY, default=True)
+    def get_runtime_transparency(self) -> int:
+        settings = self._open_settings()
+        if not settings.contains(_RUNTIME_TRANSPARENCY_KEY):
+            return 40 if self._read_boolean(_RUNTIME_TRANSPARENT_KEY, default=True) else 0
+        value = settings.value(_RUNTIME_TRANSPARENCY_KEY)
+        if isinstance(value, str) and _INTEGER_PATTERN.fullmatch(value):
+            value = int(value)
+        if type(value) is not int or not 0 <= value <= 100:
+            raise SettingsError("桌宠透明度必须是 0 到 100 的整数")
+        return value
 
-    def set_runtime_transparent(self, transparent: bool) -> None:
-        self._set_boolean(_RUNTIME_TRANSPARENT_KEY, transparent)
+    def set_runtime_transparency(self, transparency: int) -> None:
+        if type(transparency) is not int or not 0 <= transparency <= 100:
+            raise SettingsError("桌宠透明度必须是 0 到 100 的整数")
+        self._open_settings().setValue(_RUNTIME_TRANSPARENCY_KEY, transparency)
 
     def get_input_mode(self) -> str:
         mode = self._open_settings().value(_INPUT_MODE_KEY, "background")
-        if not isinstance(mode, str) or mode not in ("background", "foreground"):
-            raise SettingsError("操作模式必须是 background 或 foreground")
+        if not isinstance(mode, str) or mode not in ("background", "background_smooth", "foreground"):
+            raise SettingsError("操作模式必须是 background、background_smooth 或 foreground")
         return mode
 
     def set_input_mode(self, mode: str) -> None:
-        if not isinstance(mode, str) or mode not in ("background", "foreground"):
-            raise SettingsError("操作模式必须是 background 或 foreground")
+        if not isinstance(mode, str) or mode not in ("background", "background_smooth", "foreground"):
+            raise SettingsError("操作模式必须是 background、background_smooth 或 foreground")
         self._open_settings().setValue(_INPUT_MODE_KEY, mode)
 
     def get_pet_theme(self) -> str:
         settings = self._open_settings()
         theme = settings.value(_PET_THEME_KEY, "ufo")
-        if theme == "original":
+        if theme in ("original", "dafeiyu", "deepseek"):
             settings.setValue(_PET_THEME_KEY, "ufo")
             self.sync()
             return "ufo"

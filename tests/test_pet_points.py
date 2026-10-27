@@ -22,7 +22,7 @@ class PetPointTests(unittest.TestCase):
             window.deleteLater()
         self.app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
 
-    def test_click_feedback_reuses_pet_for_both_themes(self):
+    def test_click_feedback_reuses_pet_for_all_themes(self):
         for theme in ("ufo", "broom"):
             self.pet.set_theme(theme)
             for x, y in ((300, 400), (500, 600), (700, 800)):
@@ -30,7 +30,9 @@ class PetPointTests(unittest.TestCase):
                 self.assertEqual(self.actor.fingertip, QtCore.QPointF(x, y))
                 self.assertTrue(self.actor.visual_active)
                 self.assertFalse(self.pet.point_overlay.isVisible())
-            self.actor.advance(self.actor._clock()+10)
+            start = self.actor._clock()
+            for step in range(1, 601):
+                self.actor.advance(start + step*.02)
             self.assertFalse(self.actor.visual_active)
 
     def test_manual_drag_holds_moves_and_releases_the_pet(self):

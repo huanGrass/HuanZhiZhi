@@ -211,9 +211,9 @@ class PetComponent(QtCore.QObject):
         self._reposition_speech_bubble()
         self.theme_changed.emit(theme)
 
-    def start_foreground_input(self, request, on_done: Callable) -> None:
-        """Execute one validated task request on the Qt animation timeline."""
-        from huanzhizhi.platform.foreground_input import ForegroundMouse
+    def start_foreground_input(self, request, on_done: Callable, *, background: bool = False) -> None:
+        """Share animation, completion and cancellation for both input backends."""
+        from huanzhizhi.platform.foreground_input import BackgroundMouse, ForegroundMouse
         from huanzhizhi.platform.target_window import WindowInfo
         from huanzhizhi.platform.screen_coordinates import physical_to_qt_global
         if self.control_active:
@@ -226,7 +226,7 @@ class PetComponent(QtCore.QObject):
         self._hide_point_overlays()
         animation = self._ensure_animation()
         info = WindowInfo(**request.window)
-        mouse = ForegroundMouse(info, request.kind)
+        mouse = BackgroundMouse(info, request.kind) if background else ForegroundMouse(info, request.kind)
         mouse.begin()
         start = (info.left+request.x, info.top+request.y)
         end = None if request.kind != 'drag' else (info.left+request.end_x, info.top+request.end_y)
@@ -272,7 +272,7 @@ class PetComponent(QtCore.QObject):
             self._foreground_request_id = request.request_id
             self.foreground_changed.emit(True)
             self._set_animation_passthrough(True)
-            origin = mouse.cursor_position()
+            origin = start if background else mouse.cursor_position()
             animation.start_action(request.kind, physical_to_qt_global(*start),
                                    None if end is None else physical_to_qt_global(*end),
                                    request.duration if end is not None else .5,
@@ -316,9 +316,9 @@ class PetComponent(QtCore.QObject):
         local_point = self._window.mapFromGlobal(global_point)
         return self._window.hit_test(local_point)
 
-    def set_runtime_transparency(self, active: bool, transparent: bool) -> None:
+    def set_runtime_transparency(self, active: bool, transparency: int) -> None:
         if active or self._animation is not None:
-            self._ensure_animation().set_runtime_transparency(active, transparent)
+            self._ensure_animation().set_runtime_transparency(active, transparency)
 
     def set_task_state(self, state: str) -> None:
         self._window.set_task_state(state)
@@ -445,12 +445,12 @@ class PetComponent(QtCore.QObject):
             self._hide_point_overlays()
         self.mouse_point_visible_changed.emit(visible)
 
-    def show_point_at_click(self, x: int, y: int) -> None:
+    def show_point_at_click(self, x: int, y: int, *, smooth: bool = False) -> None:
         if self.control_active:
             return
         _validate_click_coordinates(x, y)
         if not self._point_overlay.hint_points and not self.foreground_active and self._window.isVisible():
-            self._ensure_animation().show_feedback(QtCore.QPoint(x, y))
+            self._ensure_animation().show_feedback(QtCore.QPoint(x, y), smooth=smooth)
 
     def begin_manual_point_at_click(self, x: int, y: int) -> None:
         if self.control_active:
@@ -478,7 +478,7 @@ class PetComponent(QtCore.QObject):
         if self._animation is not None and self._animation.visual_active and not self.foreground_active:
             self._animation.cancel()
 
-    def show_hint(self, points: tuple[QtCore.QPoint, ...], kind: str, label: str) -> None:
+    def show_hint(self, points: tuple[QtCore.QPoint, ...], kind: str, label: str, *, duration: float = .5) -> None:
         if self.control_active:
             return
         self._point_overlay.show_hint(points, kind, label)
@@ -486,7 +486,7 @@ class PetComponent(QtCore.QObject):
             if kind == 'line':
                 self._finish_hint_animation()
             else:
-                self._ensure_animation().show_hint(points, kind, elapsed_ms=self._point_overlay.hint_elapsed_ms)
+                self._ensure_animation().show_hint(points, kind, duration=duration)
 
     def hide_hint(self, *, return_home: bool = False) -> None:
         """Clear transient guidance; terminal task events also end nearby waiting."""

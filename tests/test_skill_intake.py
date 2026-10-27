@@ -43,7 +43,7 @@ class IntakeTests(unittest.TestCase):
         worker.failed.connect(worker.failures.append)
         return worker
 
-    def test_questions_wait_then_new_development_session_publishes(self):
+    def test_questions_wait_then_same_session_develops_and_publishes(self):
         commands, prompts = [], []
         first = self.worker()
 
@@ -57,7 +57,7 @@ class IntakeTests(unittest.TestCase):
                 (turn / 'intake.json').write_text(json.dumps(value), encoding='utf-8')
                 worker.thread_id = 'intake-thread'
             else:
-                worker.thread_id = 'development-thread'
+                worker.thread_id = 'intake-thread'
                 entry = worker.directory / 'output/投篮验证/task.py'
                 entry.parent.mkdir(parents=True)
                 entry.write_text('# verified test fixture', encoding='utf-8')
@@ -79,7 +79,7 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual(len(commands), 3)
         self.assertNotIn('resume', commands[0])
         self.assertEqual(commands[1][commands[1].index('resume')+1], 'intake-thread')
-        self.assertNotIn('resume', commands[2])
+        self.assertEqual(commands[2][commands[2].index('resume')+1], 'intake-thread')
         self.assertIn(REQUEST, prompts[2])
         self.assertIn(CONFIRMATION, prompts[2])
         self.assertIn('角色与场景合成后的实际画面', prompts[2])
@@ -87,7 +87,7 @@ class IntakeTests(unittest.TestCase):
         saved = load_flow(second.directory)
         self.assertEqual(saved['phase'], 'development')
         self.assertEqual(saved['intake_thread_id'], 'intake-thread')
-        self.assertEqual(saved['development_thread_id'], 'development-thread')
+        self.assertEqual(saved['development_thread_id'], 'intake-thread')
 
     def test_clear_request_hands_off_without_extra_confirmation(self):
         request = '将指定文件夹的 CSV 合并为新文件，保留源文件，列名不同时报错。'
@@ -100,21 +100,22 @@ class IntakeTests(unittest.TestCase):
             current.thread_id = 'intake-thread'
             return '调查完成'
         def development(current):
-            self.assertIsNone(current.thread_id)
-            current.thread_id = 'development-thread'
+            self.assertEqual(current.thread_id, 'intake-thread')
             return '开发中'
         with patch('huanzhizhi.skill_creation.run_prompt', side_effect=investigate), \
                 patch('huanzhizhi.skill_creation.develop', side_effect=development) as develop:
             worker.run()
             develop.assert_called_once()
+        self.assertFalse(worker.failures)
         resumed = self.worker('继续', worker)
         with patch('huanzhizhi.skill_creation.run_prompt') as intake, \
                 patch('huanzhizhi.skill_creation.develop', return_value='完成'):
             resumed.run()
             intake.assert_not_called()
-        self.assertEqual(resumed.thread_id, 'development-thread')
+        self.assertFalse(resumed.failures)
+        self.assertEqual(resumed.thread_id, 'intake-thread')
 
-    def test_opencode_also_starts_fresh_development_session(self):
+    def test_opencode_also_resumes_intake_session_for_development(self):
         worker = self.worker()
         worker.agent_tool = 'opencode'
         worker.opencode_options['model'] = 'opencode/test-free'
@@ -125,7 +126,7 @@ class IntakeTests(unittest.TestCase):
                 (turn / 'intake.json').write_text(json.dumps(report()), encoding='utf-8')
                 current.thread_id = 'ses_intake'
             else:
-                current.thread_id = 'ses_development'
+                current.thread_id = 'ses_intake'
             return 0
         with patch('huanzhizhi.skill_creation.ai_opencode.check_configuration', return_value='opencode'), \
                 patch('huanzhizhi.skill_creation.ai_opencode.require_free_model'), \
@@ -134,8 +135,9 @@ class IntakeTests(unittest.TestCase):
             worker.run()
         self.assertFalse(worker.failures)
         self.assertEqual(len(commands), 2)
-        self.assertTrue(all('--session' not in command for command in commands))
-        self.assertEqual(worker.thread_id, 'ses_development')
+        self.assertNotIn('--session', commands[0])
+        self.assertEqual(commands[1][commands[1].index('--session')+1], 'ses_intake')
+        self.assertEqual(worker.thread_id, 'ses_intake')
 
     def test_mixed_types_receive_only_their_special_requirements(self):
         value = report()
@@ -211,7 +213,7 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual(load_flow(worker.directory)['phase'], 'intake')
         self.assertFalse(worker.messages)
 
-    def test_failed_development_launch_retains_handoff_and_retries_new_session(self):
+    def test_failed_development_launch_retains_handoff_and_retries_same_session(self):
         worker = self.worker()
         def investigate(current, turn, prompt):
             (turn / 'intake.json').write_text(json.dumps(report()), encoding='utf-8')
@@ -221,12 +223,18 @@ class IntakeTests(unittest.TestCase):
                 patch('huanzhizhi.skill_creation.develop', side_effect=RuntimeError('launch failed')):
             worker.run()
         self.assertEqual(load_flow(worker.directory)['phase'], 'development')
-        self.assertIsNone(worker.thread_id)
+        self.assertTrue(worker.failures)
+        self.assertEqual(worker.thread_id, 'intake-thread')
+        self.assertEqual(load_flow(worker.directory)['development_thread_id'], 'intake-thread')
         resumed = self.worker('重试', worker)
+        def development(current):
+            self.assertEqual(current.thread_id, 'intake-thread')
+            return '继续开发'
         with patch('huanzhizhi.skill_creation.run_prompt') as intake, \
-                patch('huanzhizhi.skill_creation.develop', return_value='继续开发'):
+                patch('huanzhizhi.skill_creation.develop', side_effect=development) as develop:
             resumed.run()
         intake.assert_not_called()
+        develop.assert_called_once()
         self.assertFalse(resumed.failures)
 
 

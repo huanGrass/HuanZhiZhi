@@ -12,17 +12,20 @@ from huanzhizhi.agents.runtime import AgentTaskError, SettingsError
 from huanzhizhi.python_runtime import _stop_process
 from .install import managed_executable
 
-DEFAULT_OPTIONS = {'executable': '', 'model': ''}
+DEFAULT_OPTIONS = {'executable': '', 'model': '', 'reasoning_effort': ''}
 
 
 def validate_options(options):
-    if not isinstance(options, dict) or set(options) != set(DEFAULT_OPTIONS):
+    if not isinstance(options, dict) or set(options) not in ({'executable', 'model'}, set(DEFAULT_OPTIONS)):
         raise SettingsError('OpenCode 设置需要程序位置和模型。')
     if any(not isinstance(v, str) or '\x00' in v for v in options.values()):
         raise SettingsError('OpenCode 设置格式无效。')
     model = options['model']
     if model and not re.fullmatch(r'opencode/[a-zA-Z0-9._-]+', model):
         raise SettingsError('免费体验请选择 OpenCode 官方模型。')
+    effort = options.get('reasoning_effort', '')
+    if effort and not re.fullmatch(r'[a-zA-Z0-9._-]+', effort):
+        raise SettingsError('OpenCode 推理强度无效。')
     path = options['executable']
     if path and (not Path(path).is_absolute() or Path(path).suffix.lower() != '.exe'):
         raise SettingsError('请选择 OpenCode 原生 .exe 程序的完整路径。')
@@ -105,21 +108,35 @@ def free_models(path, check_stop=lambda: None):
                 continue
             model = 'opencode/' + item['id']
             validate_options({'executable': '', 'model': model})
+            efforts = []
+            for variant in item.get('variants', []):
+                effort = variant['id']
+                validate_options(dict(executable='', model=model, reasoning_effort=effort))
+                if not effort or effort in efforts:
+                    raise ValueError()
+                efforts.append(effort)
             models.append({'id': model, 'name': item.get('name') or model,
-                           'image': 'image' in item.get('capabilities', {}).get('input', [])})
+                           'image': 'image' in item.get('capabilities', {}).get('input', []),
+                           'efforts': efforts})
     except (ValueError, KeyError, TypeError, AttributeError) as error:
         raise SettingsError('无法读取 OpenCode 模型目录，请检查 OpenCode 版本或网络。') from error
     return sorted(models, key=lambda m: (not m['image'], m['name']))
 
 
-def require_free_model(path, model, check_stop=lambda: None):
-    if not model or model not in {m['id'] for m in free_models(path, check_stop)}:
+def require_free_model(path, model, check_stop=lambda: None, *, reasoning_effort=''):
+    selected = next((m for m in free_models(path, check_stop) if m['id'] == model), None)
+    if not selected:
         raise SettingsError('所选模型已不在当前免费目录，请重新检测并选择免费模型；不会切换到付费模型。')
+    if reasoning_effort and reasoning_effort not in selected.get('efforts', []):
+        raise SettingsError('所选模型不再提供此推理强度，请在 AI 设置中重新选择。')
 
 
 def build_command(path, options, thread_id=None, *, probe=False, observation_image=None):
     validate_options(options)
-    command = [path, 'run', '--standalone', '--format', 'json', '--model', options['model'],
+    model = options['model']
+    if options.get('reasoning_effort'):
+        model += '#' + options['reasoning_effort']
+    command = [path, 'run', '--standalone', '--format', 'json', '--model', model,
                '--agent', 'build', '--title', '之之技能开发']
     if observation_image:
         command += ['--file', str(observation_image.resolve())]
@@ -164,8 +181,10 @@ def failure_message(error):
     status = data.get('status', data.get('statusCode'))
     if 'free tier can only be used' in message.lower():
         return 'OpenCode 免费服务拒绝了此模型请求。请更新官方 OpenCode 或选择其他免费模型后测试。'
+    if data.get('type') == 'provider.quota' or 'free usage limit reached' in message.lower():
+        return 'OpenCode 服务提示已达到免费用量限制，请在 OpenCode 中查看或稍后重试。'
     if status == 429:
-        return 'OpenCode 免费模型已限流或额度用尽，请稍后重试或选择其他免费模型。'
+        return 'OpenCode 服务暂时限制了请求（HTTP 429），请稍后重试。'
     if status in (401, 403):
         return 'OpenCode 模型认证或访问权限未通过，请检查账号、地区限制或选择其他免费模型。'
     return 'OpenCode 未完成请求，请检查网络、模型可用性和 OpenCode 配置后重试。'
@@ -258,7 +277,7 @@ def result(turn, code, options, check_stop=lambda: None):
 
 def test_connection(options, check_stop=lambda: None):
     path = check_configuration(options, check_stop)
-    require_free_model(path, options['model'], check_stop)
+    require_free_model(path, options['model'], check_stop, reasoning_effort=options.get('reasoning_effort', ''))
     env = os.environ.copy()
     env.update(environment())
     with tempfile.TemporaryDirectory(prefix='zhizhi-opencode-test-') as directory:

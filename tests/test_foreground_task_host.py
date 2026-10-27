@@ -136,6 +136,22 @@ class ForegroundTaskHostTests(unittest.TestCase):
         self.assertEqual(self.inputs.started, [])
         self.reply.assert_called_once_with("request-1", "当前任务没有启用前台操作")
 
+    def test_smooth_background_routes_task_and_ai_clicks_without_foreground_input(self):
+        self.settings.set_input_mode('background_smooth')
+        self.pet.show()
+        actor = self.pet._ensure_animation()
+        with mock.patch.object(actor, 'show_feedback') as feedback:
+            # AI clicks use this same slot while no task subprocess is running.
+            self.host.show_click_point(400, 300)
+            self.assertTrue(feedback.call_args.kwargs['smooth'])
+            self.host.start_task('demo')
+            self.start.assert_called_once_with('demo', self.host.catalog.get('demo').script_path,
+                                               None, input_mode='background_smooth')
+            self.settings.set_input_mode('background')
+            self.host.show_click_point(420, 320)
+            self.assertTrue(feedback.call_args.kwargs['smooth'])
+            self.assertEqual(self.inputs.started, [])
+
     def test_animation_start_failure_is_returned_to_the_requester(self):
         self.host.start_task("demo")
         with mock.patch.object(self.pet, "start_foreground_input", side_effect=OSError("输入无法启动")):
@@ -143,6 +159,19 @@ class ForegroundTaskHostTests(unittest.TestCase):
         self.reply.assert_called_once_with("request-1", "输入无法启动")
         self.stop.assert_not_called()
         self.assertEqual(self.errors, [])
+
+    def test_smooth_background_request_waits_for_animation_and_uses_run_mode(self):
+        self.settings.set_input_mode('background_smooth')
+        self.host.start_task('demo')
+        self.settings.set_input_mode('foreground')
+        request = self.request()
+        with mock.patch.object(self.pet, 'start_foreground_input') as animate:
+            self.dispatch(request)
+            self.assertEqual(animate.call_args.args[0], request)
+            self.assertEqual(animate.call_args.kwargs, {'background': True})
+            self.reply.assert_not_called()
+            animate.call_args.args[1](None)
+            self.reply.assert_called_once_with(request.request_id, None)
 
     def test_interruption_stops_without_sending_an_error_reply(self):
         self.host.start_task("demo")

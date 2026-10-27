@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -79,6 +80,10 @@ class TaskHostComponent(QtCore.QObject):
             raise TypeError("tasks_root 必须是 Path")
         executable = python_executable or bundled_python()
         self._pet = pet
+        self._hint_record_path = None
+        self._hint_event = None
+        self._hint_visible_since = None
+        self._hint_signature = None
         self._chat_button = chat_button
         self._settings = settings
         self._hidden_task_ids = set(settings.get_hidden_task_ids()) if settings else set()
@@ -137,6 +142,7 @@ class TaskHostComponent(QtCore.QObject):
         self._pet.foreground_changed.connect(self._sync_mouse_watcher)
         self._pet.control_changed.connect(self._sync_mouse_watcher)
         self._pet.control_revoked.connect(self._handle_control_revoked)
+        self._pet.point_overlay.installEventFilter(self)
         if self._chat_button is not None:
             self._chat_button.installEventFilter(self)
 
@@ -513,7 +519,48 @@ class TaskHostComponent(QtCore.QObject):
     @QtCore.Slot(int, int)
     def show_click_point(self, x: int, y: int) -> None:
         point = physical_to_qt_global(x, y)
-        self._pet.show_point_at_click(point.x(), point.y())
+        mode = (self._settings.get_input_mode()
+                if self._process.state == 'idle' and self._settings is not None else self._run_input_mode)
+        if mode == 'background_smooth':
+            self._pet.show_point_at_click(point.x(), point.y(), smooth=True)
+        else:
+            self._pet.show_point_at_click(point.x(), point.y())
+
+    def show_hint(self, event: HintEvent, record_path: Path | None = None) -> None:
+        if record_path != self._hint_record_path:
+            self._pet.hide_hint()
+            self._hint_record_path = record_path
+            self._hint_visible_since = None
+        self._hint_event = event
+        if event.kind == "clear" or not self._pet_visible:
+            self._pet.hide_hint()
+        else:
+            points = tuple(physical_to_qt_global(x, y) for x, y in event.points)
+            self._pet.show_hint(points, event.kind, event.label, duration=event.duration)
+        self._record_hint_state()
+
+    def _record_hint_state(self) -> None:
+        if self._hint_record_path is None or self._hint_event is None:
+            return
+        overlay = self._pet.point_overlay
+        visible = overlay.isVisible() and bool(overlay.hint_points)
+        now = time.perf_counter()
+        points = [[p.x(), p.y()] for p in overlay.hint_points]
+        signature = (self._hint_event.kind, points, self._hint_event.label, self._hint_event.duration)
+        if not visible:
+            self._hint_visible_since = None
+        elif self._hint_visible_since is None or signature != self._hint_signature:
+            self._hint_visible_since = now
+        self._hint_signature = signature
+        data = dict(at_counter=now, visible=visible, visible_since=self._hint_visible_since,
+                    kind=self._hint_event.kind, points=points, label=self._hint_event.label,
+                    duration=self._hint_event.duration)
+        try:
+            with self._hint_record_path.open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(data, ensure_ascii=False)+'\n')
+        except OSError as error:
+            self._hint_record_path = None
+            self.error.emit(f'无法写入宿主提示记录：{error}')
 
     def close(self) -> None:
         if self._closed:
@@ -525,6 +572,10 @@ class TaskHostComponent(QtCore.QObject):
         self._process.close()
         self._pet.set_task_state("idle")
         self._closed = True
+        # Detach before Qt tears down widgets and clears their Python attributes.
+        self._pet.point_overlay.removeEventFilter(self)
+        if self._chat_button is not None:
+            self._chat_button.removeEventFilter(self)
         self._presentation.close()
         self._active_descriptor = None
 
@@ -619,11 +670,7 @@ class TaskHostComponent(QtCore.QObject):
         elif isinstance(event, InputCancelEvent):
             self._pet.cancel_foreground_input(event.request_id, '任务已取消该操作')
         elif isinstance(event, HintEvent):
-            if event.kind == "clear" or not self._pet_visible:
-                self._pet.hide_hint()
-            else:
-                points = tuple(physical_to_qt_global(x, y) for x, y in event.points)
-                self._pet.show_hint(points, event.kind, event.label)
+            self.show_hint(event)
         elif isinstance(event, PreviewEvent):
             self.preview_received.emit(self._load_preview(event, descriptor))
         elif isinstance(event, FinishedEvent):
@@ -656,7 +703,7 @@ class TaskHostComponent(QtCore.QObject):
             raise TypeError(f"未知任务事件对象：{type(event).__name__}")
 
     def _start_input_request(self, event: InputRequestEvent) -> None:
-        if self._run_input_mode != 'foreground' or self._process.state != 'running':
+        if self._run_input_mode not in ('foreground', 'background_smooth') or self._process.state != 'running':
             self._process.send_input_result(event.request_id, '当前任务没有启用前台操作')
             return
         if event.request_id in self._input_requests:
@@ -691,7 +738,10 @@ class TaskHostComponent(QtCore.QObject):
                 return
 
         try:
-            self._pet.start_foreground_input(event, done)
+            if self._run_input_mode == 'background_smooth':
+                self._pet.start_foreground_input(event, done, background=True)
+            else:
+                self._pet.start_foreground_input(event, done)
         except Exception as error:
             done(error)
 
@@ -792,6 +842,8 @@ class TaskHostComponent(QtCore.QObject):
             self.error.emit(str(exc))
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if watched is self._pet.point_overlay and event.type() in (QtCore.QEvent.Type.Show, QtCore.QEvent.Type.Hide):
+            self._record_hint_state()
         if watched is self._chat_button and event.type() in (QtCore.QEvent.Type.Show, QtCore.QEvent.Type.Hide):
             self._sync_mouse_watcher()
         return super().eventFilter(watched, event)

@@ -15,6 +15,7 @@ from huanzhizhi.platform.window_policy import WindowPolicy
 from huanzhizhi.platform.target_window import DesktopWindowsError, Win32DesktopApi, WindowInfo
 from huanzhizhi.platform.window_capture import WgcWindowCapture
 from huanzhizhi.skill_creation import CreationWorker
+from huanzhizhi.tasks.protocol import HintEvent
 from huanzhizhi.settings.component import SettingsError
 from huanzhizhi.pet.exploration_conversation import ExplorationConversation
 
@@ -145,6 +146,7 @@ class ChatWindow(QtWidgets.QWidget):
     log_message = QtCore.Signal(str)
     tasks_requested = QtCore.Signal()
     click_point = QtCore.Signal(int, int)
+    hint_requested = QtCore.Signal(object, object)
     foreground_input_requested = QtCore.Signal(object, object)
     foreground_input_cancelled = QtCore.Signal(str)
     foreground_input_stop_requested = QtCore.Signal()
@@ -592,6 +594,7 @@ class ChatWindow(QtWidgets.QWidget):
         self.return_button.setEnabled(False)
         worker.progress.connect(self._exploration_progress)
         worker.click_point.connect(self._exploration_click)
+        worker.hint.connect(self._exploration_hint)
         worker.input_request.connect(self._exploration_input_request)
         worker.input_cancel.connect(self.foreground_input_cancelled)
         worker.observed.connect(self._show_observation)
@@ -612,6 +615,8 @@ class ChatWindow(QtWidgets.QWidget):
     def _configured_model_name(self) -> tuple[str, str]:
         if self._settings.get_agent_tool() == 'opencode':
             return 'opencode', self._settings.get_opencode_options()['model'] or 'OpenCode 未配置'
+        if self._settings.get_agent_tool() == 'deepseek':
+            return 'deepseek', self._settings.get_deepseek_options()['model']
         return 'codex', self._settings.get_codex_options()['model']
 
     def refresh_model_name(self) -> None:
@@ -646,6 +651,10 @@ class ChatWindow(QtWidgets.QWidget):
     def _exploration_click(self, x: int, y: int) -> None:
         if self._exploration is not None and not self._exploration_stopping:
             self.click_point.emit(x, y)
+
+    def _exploration_hint(self, event) -> None:
+        if self._exploration is self.sender() and not self._exploration_stopping:
+            self.hint_requested.emit(event, self._exploration.hint_events)
 
     def _exploration_input_request(self, event, reply) -> None:
         if self._exploration is self.sender() and not self._exploration_stopping:
@@ -704,6 +713,7 @@ class ChatWindow(QtWidgets.QWidget):
         self._cancel_initial_message()
         if self._exploration is not None and not self._exploration_stopping:
             self._exploration_stopping = True
+            self.hint_requested.emit(HintEvent('clear', (), '创建已停止'), self._exploration.hint_events)
             self.foreground_input_stop_requested.emit()
             self._exploration.requestInterruption()
             self.conversation.stop_button.setEnabled(False)
@@ -714,6 +724,7 @@ class ChatWindow(QtWidgets.QWidget):
         worker = self._exploration
         if worker is None:
             return
+        self.hint_requested.emit(HintEvent('clear', (), '创建已结束'), worker.hint_events)
         if worker.stop_error:
             self.conversation.add_message('assistant', worker.stop_error)
         elif self._exploration_stopping:

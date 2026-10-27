@@ -16,9 +16,10 @@ class XiangqiFlowTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.checkpoint = Path(temporary.name) / 'checkpoint.json'
-        self.session = Mock(stop_requested=False)
+        self.session = Mock(stop_requested=False, pause_requested=False)
         self.session.wait_for_stop.return_value = False
         self.session.wait_if_paused.return_value = False
+        self.session.apply_parameter_updates.return_value = {}
         self.view = Mock()
         self.view.finish_reason.return_value = None
         self.view.initial_history.return_value = ([], None, True, 'verified settings')
@@ -166,9 +167,140 @@ class XiangqiFlowTests(unittest.TestCase):
         with patch.object(xiangqi.time, 'monotonic', side_effect=[0, 1, 11]):
             with self.assertRaisesRegex(TimeoutError, '未重复点击'):
                 self.game.confirm_player('b2e2')
-        with patch.object(xiangqi.time, 'monotonic', side_effect=[0, 1, 21]):
+        self.view.stable.reset_mock()
+        with patch.object(xiangqi.time, 'monotonic', side_effect=[0, 1, 21, 59, 60]):
             with self.assertRaisesRegex(TimeoutError, '等待电脑'):
                 self.game.wait_opponent()
+        self.assertEqual(self.view.stable.call_count, 3)
+        self.view.click.assert_not_called()
+
+    def test_hint_accepts_other_legal_move_and_fast_computer_reply_without_clicks(self):
+        self.game.mode = 'hint'
+        self.game.think_time_ms = 2500
+        self.game.engine = self.engine
+        self.game.initialize = Mock()
+        initial = self.observation(xiangqi.START)
+        self.game.checkpoint = Mock(side_effect=[initial, initial, InterruptedError('end of replay')])
+        actual_moves = ['c3c4', 'b9c7']
+        board = self.replay_board(actual_moves)
+        self.view.stable.side_effect = [initial, self.observation(board)]
+        self.view.history.return_value = (actual_moves, 2)
+        with self.assertRaisesRegex(InterruptedError, 'end of replay'):
+            self.game.run()
+        self.engine.search.assert_called_once_with([], 2500)
+        self.assertEqual(self.game.moves, actual_moves)
+        self.assertEqual(json.loads(self.checkpoint.read_text())['moves'], actual_moves)
+        self.view.hint.assert_called_once_with(initial, 'b2e2')
+        self.view.click.assert_not_called()
+        self.session.emit_hint.assert_called_with([], 'clear', '已结束本手提示')
+
+    def test_hint_wait_has_no_manual_deadline_and_accepts_single_move(self):
+        self.game.mode = 'hint'
+        self.game.engine = self.engine
+        initial = self.observation(xiangqi.START)
+        self.view.stable.side_effect = [initial, initial, self.observation(self.replay_board(['c3c4']))]
+        with patch.object(xiangqi.time, 'monotonic', side_effect=AssertionError('manual wait must not time out')):
+            self.game.wait_player('b2e2', self.engine.legal.return_value)
+        self.assertEqual(self.game.moves, ['c3c4'])
+        self.view.history.assert_not_called()
+        self.view.click.assert_not_called()
+
+    def test_hint_rejects_unverified_board_without_overwriting_checkpoint(self):
+        self.game.mode = 'hint'
+        self.game.engine = self.engine
+        self.game.save_checkpoint()
+        saved = self.checkpoint.read_text()
+        self.view.stable.return_value = self.observation(self.replay_board(['b2b5']))
+        self.view.history.return_value = (['b2b5', 'b9c7'], 2)
+        with self.assertRaisesRegex(ValueError, '不能与棋盘核对'):
+            self.game.wait_player('b2e2', self.engine.legal.return_value)
+        self.assertEqual(self.checkpoint.read_text(), saved)
+        self.view.click.assert_not_called()
+        self.session.emit_hint.assert_called_with([], 'clear', '已结束本手提示')
+
+    def test_hint_pause_and_stop_clear_visuals_without_input(self):
+        self.game.mode = 'hint'
+        self.game.engine = self.engine
+        self.session.pause_requested = True
+        def resume_stopped():
+            self.session.emit_hint.assert_called_with([], 'clear', '已暂停提示')
+            self.session.stop_requested = True
+            return True
+        self.session.wait_if_paused.side_effect = resume_stopped
+        with self.assertRaises(InterruptedError):
+            self.game.wait_player('b2e2', self.engine.legal.return_value)
+        self.view.hint.assert_not_called()
+        self.view.click.assert_not_called()
+        self.session.emit_hint.assert_called_with([], 'clear', '已结束本手提示')
+
+    def test_invalid_play_parameters_are_rejected_before_engine_start(self):
+        for options in ({'think_time_ms': True}, {'think_time_ms': 99},
+                        {'think_time_ms': 60001}, {'mode': 'invalid'}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                xiangqi.Game(self.session, self.view, checkpoint_file=self.checkpoint, **options)
+
+    def test_runtime_thinking_time_applies_to_next_search(self):
+        self.game.initialize = Mock()
+        self.game.engine = self.engine
+        self.session.apply_parameter_updates.return_value = {'think_time_ms': 2500, 'mode': 'auto'}
+        self.view.observe.return_value = self.observation(xiangqi.START, selected=64)
+        self.game.confirm_player = Mock(side_effect=InterruptedError('end of replay'))
+        with self.assertRaises(InterruptedError):
+            self.game.run()
+        self.engine.search.assert_called_once_with([], 2500)
+        self.assertEqual([call.args[1] for call in self.view.click.call_args_list], ['b2', 'e2'])
+
+    def test_switch_to_hint_during_search_prevents_source_click(self):
+        self.prepare_click()
+        def search(*args):
+            self.session.apply_parameter_updates.return_value = {'mode': 'hint'}
+            return 'b2e2'
+        self.engine.search.side_effect = search
+        self.game.wait_player = Mock(side_effect=InterruptedError('hint reached'))
+        with self.assertRaisesRegex(InterruptedError, 'hint reached'):
+            self.game.run()
+        self.game.wait_player.assert_called_once()
+        self.view.click.assert_not_called()
+
+    def test_switch_to_hint_after_selection_prevents_destination_click(self):
+        self.prepare_click()
+        def observe(**kwargs):
+            self.session.apply_parameter_updates.return_value = {'mode': 'hint'}
+            return self.observation(xiangqi.START, selected=64)
+        self.view.observe.side_effect = observe
+        self.game.wait_player = Mock(side_effect=InterruptedError('hint reached'))
+        with self.assertRaisesRegex(InterruptedError, 'hint reached'):
+            self.game.run()
+        self.assertEqual([call.args[1] for call in self.view.click.call_args_list], ['b2'])
+        self.game.confirm_player.assert_not_called()
+
+    def test_switch_from_hint_to_auto_clears_hint_and_rechecks_changed_board(self):
+        self.game.mode = 'hint'
+        self.game.initialize = Mock()
+        self.game.engine = self.engine
+        initial = self.observation(xiangqi.START)
+        self.view.stable.side_effect = [initial, initial, initial,
+                                       self.observation(self.replay_board(['c3c4']))]
+        def switch(_seconds):
+            self.session.apply_parameter_updates.return_value = {'mode': 'auto'}
+            return False
+        self.session.wait_for_stop.side_effect = switch
+        with self.assertRaisesRegex(ValueError, '局面在安全边界发生变化'):
+            self.game.run()
+        self.assertEqual(self.game.mode, 'auto')
+        self.view.hint.assert_called_once()
+        self.session.emit_hint.assert_called_with([], 'clear', '已结束本手提示')
+        self.view.click.assert_not_called()
+
+    def test_runtime_parameters_apply_while_waiting_for_computer(self):
+        self.game.engine = self.engine
+        self.engine.legal.return_value = {'b9c7'}
+        self.game.moves = ['b2e2']
+        self.game.expected = self.replay_board(self.game.moves)
+        self.session.apply_parameter_updates.return_value = {'mode': 'hint', 'think_time_ms': 1000}
+        self.view.stable.return_value = self.observation(self.replay_board(['b2e2', 'b9c7']))
+        self.game.wait_opponent()
+        self.assertEqual((self.game.mode, self.game.think_time_ms), ('hint', 1000))
         self.view.click.assert_not_called()
 
     def test_terminal_site_checks_and_engine_terminal_are_both_required(self):
@@ -253,6 +385,29 @@ class XiangqiEngineTests(unittest.TestCase):
             self.assertEqual(engine.legal(history), {'b2e2', 'c3c4'})
             self.assertEqual(engine.search(history), 'b2e2')
         self.assertEqual(len(self.processes), 1)
+
+    def test_current_position_and_history_use_the_same_persistent_engine(self):
+        fen = '4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1'
+        self.client = xiangqi.Engine(self.session, Mock(), initial_fen=fen)
+        self.client.legal(['e0d0', 'e9d9'])
+        self.client.search(['e0d0', 'e9d9'])
+        self.client.record.assert_any_call('uci_in', command='position fen '+fen+' moves e0d0 e9d9')
+        self.assertEqual(len(self.processes), 1)
+
+    def test_invalid_initial_position_is_rejected_before_launch(self):
+        with self.assertRaisesRegex(ValueError, 'FEN'):
+            xiangqi.Engine(self.session, Mock(), initial_fen='bad\nquit')
+        self.assertEqual(self.processes, [])
+
+    def test_configured_thinking_time_reaches_engine_and_extends_response_timeout(self):
+        engine = self.start()
+        with patch.object(engine, 'until', wraps=engine.until) as wait:
+            self.assertEqual(engine.search([], 60000), 'b2e2')
+        engine.record.assert_any_call('uci_in', command='go movetime 60000')
+        self.assertEqual(wait.call_args.kwargs['timeout'], 65)
+        for value in (True, 99, 60001, '500'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                engine.search([], value)
 
     def test_startup_exit_is_reported_and_cleaned_up(self):
         self.mode = 'startup_exit'

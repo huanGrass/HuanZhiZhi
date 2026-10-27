@@ -38,6 +38,7 @@ class SpeechBubbleWindow(QtWidgets.QWidget):
         self.tail_edge = "down"
 
         self.label = QtWidgets.QLabel(self)
+        self.label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
         self.label.setWordWrap(True)
         self.label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.NoTextInteraction)
 

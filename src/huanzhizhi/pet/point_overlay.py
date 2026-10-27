@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -13,21 +12,6 @@ from huanzhizhi.platform.window_policy import WindowPolicy
 DEFAULT_DISPLAY_SCALE = 0.32
 MIN_DISPLAY_SCALE = 0.19
 MAX_DISPLAY_SCALE = 1.25
-
-
-def hint_phase_and_anchor(
-    points: Sequence[QtCore.QPoint | QtCore.QPointF], kind: str, elapsed_ms: float,
-) -> tuple[float, QtCore.QPointF | None]:
-    """Sample the existing hint rhythm in local or global coordinates."""
-    phase = (elapsed_ms % 2600) / 2600
-    if kind == "line":
-        return phase, None
-    if kind == "drag":
-        progress = min(1.0, max(0.0, (phase-.15)/.5))
-        progress = progress*progress*(3-2*progress)
-        start, end = QtCore.QPointF(points[0]), QtCore.QPointF(points[1])
-        return phase, start + (end-start)*progress
-    return phase, QtCore.QPointF(points[0 if len(points) == 1 or phase < .7 else 1])
 
 
 class PointOverlayWindow(QtWidgets.QWidget):
@@ -74,7 +58,7 @@ class PointOverlayWindow(QtWidgets.QWidget):
 
     @property
     def hint_elapsed_ms(self) -> int:
-        """Share the active hint clock with the themed character."""
+        """Elapsed time for the marker pulse; motion uses the action animation."""
         return self._hint_clock.elapsed() if self._hint_clock.isValid() else 0
 
     def hide_overlay(self) -> None:
@@ -89,7 +73,7 @@ class PointOverlayWindow(QtWidgets.QWidget):
             self.hide_overlay()
 
     def show_hint(self, points: tuple[QtCore.QPoint, ...], kind: str, label: str) -> None:
-        expected = {"click": {1, 2}, "drag": {3}, "line": {2}}
+        expected = {"click": {1, 2}, "right_click": {1}, "double_click": {1}, "drag": {2, 3}, "line": {2}}
         if kind not in expected or len(points) not in expected[kind]:
             raise ValueError("提示类型或坐标数量无效")
         if not all(isinstance(point, QtCore.QPoint) for point in points):
@@ -134,7 +118,7 @@ class PointOverlayWindow(QtWidgets.QWidget):
             painter.setPen(QtGui.QPen(QtGui.QColor("#20e6ff"), 1.5))
             painter.drawLine(points[0], points[1])
             return
-        phase, _ = hint_phase_and_anchor(points, self._hint_kind, self.hint_elapsed_ms)
+        phase = (self.hint_elapsed_ms % 2600) / 2600
         color = QtGui.QColor("#b98bff")
         pen = QtGui.QPen(color, 2.5)
         pen.setStyle(QtCore.Qt.PenStyle.DashLine)
@@ -225,5 +209,4 @@ __all__ = (
     "MIN_DISPLAY_SCALE",
     "DesktopPetPointOverlayWindow",
     "PointOverlayWindow",
-    "hint_phase_and_anchor",
 )

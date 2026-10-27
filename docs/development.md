@@ -17,6 +17,14 @@ python scripts/prepare_python.py
 
 完整包排除 CPython 自身的 `python/Lib/test/` 回归测试及证书样本，保留 `unittest` 等正常标准库功能；复制与兼容性指纹使用同一过滤规则。
 
+## DeepSeek Harness 接入
+
+在「AI 设置」中选择 DeepSeek Harness，使用 Harness 自己保存的 DeepSeek 账号登录。模型目录通过已安装的 Harness 查询，幻之之只接收模型名称、推理选项和图片能力，不读取或保存凭据；目录查询不发起模型推理。首次使用 SDK 时，Harness 会初始化自己的 SDK profile。已核对 Windows Desktop `0.2.1-rc.2`。
+
+`agents/deepseek/` 适配安装入口和 SDK 的 stdio JSON-RPC，复用 `skill_creation.run_prompt` 与 `agents.runtime.run_agent` 的草稿、输入、停止和交付流程。SDK 直接接收图片，并通过同一个会话 ID 续接修改；恢复失败不创建空会话冒充续接。只有本轮明确完成且返回非空答复才作为成功。用户停止时，公共运行器结束适配进程及 Harness 子进程树。
+
+开发阶段沿用 Harness 的沙箱设置，以本轮配置将交互审批设为 `never`（需要审批的操作直接拒绝）；不覆盖全局配置。“AI 先看看”使用独立会话，直接传入截图，通过 Harness 的工具 guard 禁止执行工具，同时关闭宿主输入通道。只支持文字的模型会在模型列表中标注。完整业务验收仍需可用的账号额度；目录读取、协议测试和错误回执不能代替真实技能创建验证。
+
 ## 验证
 
 宿主测试按模块使用独立进程，避免 Qt 窗口、定时器在测试模块间残留。砖了个砖的截图、标注数据和技能回归测试仅保留在独立内部技能目录，不纳入公开仓库或发行包。整套宿主测试在同一进程中曾出现 Windows 异常退出，尚未定位，不能视为已通过：
@@ -31,7 +39,20 @@ foreach ($test in Get-ChildItem tests/test_*.py) {
 
 Windows 原生窗口恢复测试需要 `QT_QPA_PLATFORM=windows`，无界面测试中会跳过。原生测试只操作自身测试窗口。真实游戏表现、首次 AI 登录/调用以及没有安装 Python 的干净 Windows 仍需单独验证；离线或模拟测试不能替代这些验证。
 
-`verify_capabilities.py` 用于独立测试窗口的 OCR 和输入动作验证，运行前阅读其参数。旧探索流程保留通用协议兼容，不提供依赖内部技能的专用动作。
+原生前台输入测试需要显式启用，只向自建窗口发送真实鼠标动作，并等待动作结束后的 8 秒停留及返程：
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:HUANZHIZHI_NATIVE_INPUT_TEST = '1'
+.\python\python.exe -X utf8 -m unittest tests.test_foreground_input_native -v
+.\python\python.exe -X utf8 scripts/verify_capabilities.py
+```
+
+`verify_capabilities.py` 通过临时技能的 `TaskProcessManager` / `TaskSession` 通道验证自建窗口的后台输入和 OCR。结果保存在 `artifacts/capabilities-<时间>/report.json`，宿主协议结果保存在同目录 `host.json`。各项独立记录，失败后仍继续其他检查，最终以非零状态退出；`double_click_native` 表示 Win32 双击消息序列到达，`double_click` 表示 Qt 实际生成了双击事件，两者分别判定。
+
+已定位 Qt 6.11.2 的后台双击兼容性问题：Qt 将 `WM_LBUTTONDBLCLK` 转成普通按下，再按时间、位置和窗口自行识别双击。实窗中，两次点击之间会插入真实光标位置的 `WM_MOUSEMOVE`，位置偏离时清除 Qt 双击状态，即使原生消息序列正确仍可能只收到两次单击。诊断窗口过滤该额外移动消息后可收到双击，阻塞目标事件循环也可能掩盖问题；验证脚本保留正常事件处理和失败记录，不以这些诊断手段代替通过。
+
+旧探索流程保留通用协议兼容，不提供依赖内部技能的专用动作。
 
 ## 完整包
 

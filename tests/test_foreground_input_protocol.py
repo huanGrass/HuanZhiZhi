@@ -19,7 +19,7 @@ from huanzhizhi import task_sdk
 from huanzhizhi.platform.target_window import Win32DesktopApi, WindowInfo
 from huanzhizhi.tasks.process import TaskProcessManager
 from huanzhizhi.tasks.protocol import (
-    FinishedEvent, InputCancelEvent, InputRequestEvent, ProtocolError,
+    FinishedEvent, InputBlockedEvent, InputCancelEvent, InputRequestEvent, ProtocolError,
     encode_input_result, parse_event_line,
 )
 
@@ -34,6 +34,12 @@ def request_payload(**changes):
 
 
 class InputProtocolTests(unittest.TestCase):
+    def test_blocked_input_is_a_notification_without_executable_payload(self):
+        payload = dict(protocol_version=1, type='input_blocked')
+        self.assertEqual(parse_event_line(json.dumps(payload)), InputBlockedEvent())
+        with self.assertRaises(ProtocolError):
+            parse_event_line(json.dumps(payload | {'kind': 'click'}))
+
     def test_request_and_cancel_parse_complete_window_identity_and_client_coordinates(self):
         event = parse_event_line(json.dumps(request_payload()))
         self.assertIsInstance(event, InputRequestEvent)
@@ -122,6 +128,19 @@ class ForegroundRoutingTests(unittest.TestCase):
         self.assertEqual(messages, [0x200, 0x201] + [0x200] * 5 + [0x202])
         self.assertEqual(self.native.post_message.call_args.args[3], (150 << 16) | 100)
 
+    def test_smooth_background_waits_for_host_instead_of_posting_early(self):
+        with patch.dict(os.environ, HUANZHIZHI_INPUT_MODE='background_smooth'), \
+                patch('huanzhizhi.platform.target_window._request_foreground_input') as request, \
+                patch('huanzhizhi.platform.target_window._emit_click_point') as point:
+            for kind in ('click', 'right_click', 'double_click'):
+                self.api.post_click(self.window, 30, 40, kind, wait=lambda _: None)
+                request.assert_called_with(WINDOW, kind, 30, 40)
+            self.api.post_drag(self.window, 30, 40, 100, 150, .3, wait=lambda _: None)
+            request.assert_called_with(WINDOW, 'drag', 30, 40, 100, 150, .3)
+            point.assert_not_called()
+        self.native.post_message.assert_not_called()
+        self.native.set_foreground_window.assert_not_called()
+
 
 class InputFileChannelTests(unittest.TestCase):
     def setUp(self):
@@ -173,6 +192,33 @@ class InputFileChannelTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'target moved'):
                 result.result(timeout=2)
         self.assertEqual(len(self.events.read_bytes().splitlines()), 1)
+
+    def test_temporarily_unreadable_reply_waits_without_resending_input(self):
+        read_bytes = Path.read_bytes
+        denied = []
+
+        def read_reply(path):
+            if path.parent.name.endswith('.replies') and path.exists() and not denied:
+                denied.append(path)
+                raise PermissionError(13, 'Permission denied', str(path))
+            return read_bytes(path)
+
+        with patch.object(Path, 'read_bytes', read_reply), ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(task_sdk._request_foreground_input, WINDOW, 'click', 30, 40, timeout=2)
+            request = self._request()
+            reply = self._reply(request.request_id)
+            self.assertIsNone(result.result(timeout=2))
+        self.assertEqual(denied, [reply])
+        self.assertFalse(reply.exists())
+        self.assertEqual(len(self.events.read_bytes().splitlines()), 1)
+
+    def test_unreadable_reply_remains_bounded_and_cancels(self):
+        with patch.object(Path, 'read_bytes', side_effect=PermissionError(13, 'Permission denied')):
+            with self.assertRaises(TimeoutError):
+                task_sdk._request_foreground_input(WINDOW, 'click', 30, 40, timeout=.04)
+        events = [parse_event_line(line) for line in self.events.read_bytes().splitlines()]
+        self.assertEqual([event.type for event in events], ['input_request', 'input_cancel'])
+        self.assertEqual(events[0].request_id, events[1].request_id)
 
     def test_file_timeout_sends_cancel(self):
         with self.assertRaises(TimeoutError):
@@ -324,6 +370,16 @@ class InputProcessChannelTests(unittest.TestCase):
         self.assertEqual(self.errors, [])
         with self.assertRaisesRegex(ValueError, 'input_mode'):
             self.manager.start('input', path, input_mode='invalid')
+
+    def test_smooth_background_mode_reaches_subprocess_sdk(self):
+        self._start('''
+            from huanzhizhi.task_sdk import _input_mode
+            assert _input_mode() == 'background_smooth'
+            session.emit_finished('完成', '测试', '平滑后台')
+        ''', mode='background_smooth')
+        self._wait(lambda: self.manager.state == 'idle')
+        self.assertEqual(self.errors, [])
+        self.assertEqual([event.type for event in self.events], ['finished'])
 
 
 if __name__ == '__main__':

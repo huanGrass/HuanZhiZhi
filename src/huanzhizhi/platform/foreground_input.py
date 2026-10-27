@@ -1,11 +1,66 @@
-"""Foreground mouse input driven by the pet's rendered animation phases."""
+"""Mouse input driven by the pet's rendered animation phases."""
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
 import math
 
-from huanzhizhi.platform.target_window import Win32DesktopApi, WindowInfo
+from huanzhizhi.platform.target_window import Win32DesktopApi, WindowInfo, _client_coordinate
+
+
+class BackgroundMouse:
+    """Send window messages at contact, without moving or claiming the cursor."""
+
+    def __init__(self, info: WindowInfo, kind: str, *, api=None):
+        if kind not in ('click', 'right_click', 'double_click', 'drag'):
+            raise ValueError('不支持的后台鼠标操作')
+        self.info, self.kind = info, kind
+        self.api = api if api is not None else Win32DesktopApi(configure_dpi_awareness=False)
+        self.pressed = False
+        self._started = False
+        self._press_count = 0
+        self._last_position = 0
+        self._down, self._up, self._flag = (0x204, 0x205, 2) if kind == 'right_click' else (0x201, 0x202, 1)
+
+    def begin(self) -> None:
+        self.api._require_unchanged(self.info)
+        self._started = True
+
+    def step(self, phase: str, point: tuple[int, int]) -> None:
+        if not self._started:
+            raise RuntimeError('后台鼠标操作尚未开始')
+        if phase not in ('move', 'press', 'drag', 'release'):
+            raise ValueError('未知后台输入阶段')
+        self.api._require_unchanged(self.info)
+        if phase == 'move':
+            return  # Approach is visual only; do not send input before contact.
+        x = _client_coordinate(point[0]-self.info.left, 'x', self.info.width)
+        y = _client_coordinate(point[1]-self.info.top, 'y', self.info.height)
+        packed = (y << 16) | x
+        if phase == 'press':
+            if self.pressed:
+                raise RuntimeError('不能重复按下鼠标')
+            self.api._post_input(self.info, 0x200, 0, packed)
+            self._last_position = packed
+            self.pressed = True  # A failed down must still take the release path.
+            down = 0x203 if self.kind == 'double_click' and self._press_count else self._down
+            self.api._post_input(self.info, down, self._flag, packed)
+            self._press_count += 1
+        else:
+            if not self.pressed:
+                raise RuntimeError('鼠标尚未按下，不能拖拽或松开')
+            self._last_position = packed
+            self.api._post_input(self.info, self._up if phase == 'release' else 0x200,
+                                 0 if phase == 'release' else self._flag, packed)
+            if phase == 'release':
+                self.pressed = False
+
+    def close(self) -> None:
+        # A moved/closed target or cancelled animation must not leave a button held.
+        if self.pressed:
+            self.api._post_input(self.info, self._up, 0, self._last_position)
+            self.pressed = False
+        self._started = False
 
 
 class _MouseInput(ctypes.Structure):

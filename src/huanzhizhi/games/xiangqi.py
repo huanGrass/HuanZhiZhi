@@ -31,8 +31,11 @@ def check_engine():
 
 
 class Engine:
-    def __init__(self, session, record):
+    def __init__(self, session, record, *, initial_fen=None):
         self.session, self.record = session, record
+        if initial_fen is not None and not re.fullmatch(r'[rnbakcpRNBAKCP1-9/]+ [wb] - - \d+ \d+', initial_fen):
+            raise ValueError("初始局面 FEN 无效")
+        self.initial_fen = initial_fen
         self.queue = queue.Queue()
         _, _, executable, model = component_paths()
         self.process = subprocess.Popen(
@@ -84,7 +87,8 @@ class Engine:
         raise TimeoutError("皮卡鱼响应超时")
 
     def position(self, moves):
-        self.send("position startpos" + (" moves " + " ".join(moves) if moves else ""))
+        position = "fen " + self.initial_fen if self.initial_fen else "startpos"
+        self.send("position " + position + (" moves " + " ".join(moves) if moves else ""))
 
     def legal(self, moves):
         self.position(moves)
@@ -92,11 +96,13 @@ class Engine:
         lines = self.until(lambda s:s.startswith("Nodes searched:"))
         return {m.group(1) for line in lines if (m := re.match(r"^([a-i][0-9][a-i][0-9]):\s+1$", line))}
 
-    def search(self, moves):
+    def search(self, moves, think_time_ms=500):
+        if type(think_time_ms) is not int or not 100 <= think_time_ms <= 60000:
+            raise ValueError("每步思考时间必须在 100 到 60000 毫秒之间")
         started = time.perf_counter()
         self.position(moves)
-        self.send("go movetime 500")
-        lines = self.until(lambda s:s.startswith("bestmove "))
+        self.send(f"go movetime {think_time_ms}")
+        lines = self.until(lambda s:s.startswith("bestmove "), timeout=max(12, think_time_ms/1000+5))
         move = lines[-1].split()[1]
         self.record("search", move=move, seconds=time.perf_counter()-started, ply=len(moves))
         if move in ("(none)", "0000"):
@@ -145,7 +151,7 @@ class GameEnded(Exception):
 
 
 class Game:
-    def __init__(self, session, view, *, checkpoint_file):
+    def __init__(self, session, view, *, checkpoint_file, think_time_ms=500, mode="auto"):
         """Use one concrete site object, without inheritance or registration.
 
         view provides observe(after=None), stable(), click(layout, square, ply=...),
@@ -157,8 +163,14 @@ class Game:
         initial_history returns visible moves, total ply, initial-position visibility,
         and diagnostic evidence; history returns visible moves and total ply. The
         site validates orientation/settings and terminal artwork, not the controller.
+        Hint mode also uses view.hint(observation, move) for visual-only guidance.
         """
+        if type(think_time_ms) is not int or not 100 <= think_time_ms <= 60000:
+            raise ValueError("每步思考时间必须在 100 到 60000 毫秒之间")
+        if mode not in ("auto", "hint"):
+            raise ValueError("对弈模式无效")
         self.session, self.view = session, view
+        self.think_time_ms, self.mode = think_time_ms, mode
         self.checkpoint_file = Path(checkpoint_file)
         self.started = time.perf_counter()
         self.moves = []
@@ -168,6 +180,11 @@ class Game:
     def check_stop(self):
         if self.session.stop_requested:
             raise InterruptedError("用户停止")
+
+    def apply_parameters(self):
+        options = self.session.apply_parameter_updates()
+        self.think_time_ms = options.get("think_time_ms", self.think_time_ms)
+        self.mode = options.get("mode", self.mode)
 
     def initialize(self):
         self.engine = Engine(self.session, self.view.record)
@@ -209,7 +226,9 @@ class Game:
         self.view.record_frame(observation)
         self.check_finished(observation)
         self.view.record("initialized", seconds=time.perf_counter()-self.started)
-        self.session.emit_status("对弈中", "棋盘及皮卡鱼已确认", "仅操作当前局玩家红方，逐步核对棋盘和合法走法")
+        self.session.emit_status("对弈中", "棋盘及皮卡鱼已确认",
+                                 "仅提示红方走法，由你手动落子" if self.mode == "hint" else
+                                 "仅操作当前局玩家红方，逐步核对棋盘和合法走法")
 
     def confirm_history(self, observation):
         rows, ply = self.view.history(observation)
@@ -237,6 +256,7 @@ class Game:
     def checkpoint(self):
         resumed = self.session.wait_if_paused()
         self.check_stop()
+        self.apply_parameters()
         image,board,origin,selected=self.view.stable()
         if board!=self.expected:
             raise ValueError("局面在安全边界发生变化")
@@ -284,10 +304,12 @@ class Game:
         legal=self.engine.legal(self.moves)
         if not legal:
             raise ValueError("引擎确认无合法应手，但网页终局画面尚待核对")
-        deadline=time.monotonic()+20
+        deadline=time.monotonic()+60
         self.session.emit_status("等待电脑","玩家落子已确认","电脑回合只观察，不发送点击")
         self.view.record("waiting_opponent",ply=len(self.moves))
         while time.monotonic()<deadline:
+            self.check_stop()
+            self.apply_parameters()
             image,board,origin,selected=self.view.stable()
             if board==self.expected:
                 if self.session.wait_for_stop(.15):
@@ -307,6 +329,57 @@ class Game:
             return
         raise TimeoutError("等待电脑应手超时，已停止")
 
+    def wait_player(self, move, legal):
+        self.session.emit_status("等待你落子", "仅提示", f"建议 {move[:2].upper()} → {move[2:].upper()}；也可以选择其他合法走法")
+        try:
+            while True:
+                self.check_stop()
+                if self.session.pause_requested:
+                    self.session.emit_hint([], "clear", "已暂停提示")
+                resumed = self.session.wait_if_paused()
+                self.check_stop()
+                self.apply_parameters()
+                if self.mode == "auto":
+                    return
+                observation = self.view.stable()
+                board = observation[1]
+                if board == self.expected:
+                    if resumed and self.moves:
+                        self.confirm_history(observation)
+                    self.check_finished(observation)
+                    self.view.hint(observation, move)
+                    if self.session.wait_for_stop(.15):
+                        raise InterruptedError("用户停止")
+                    continue
+                self.session.emit_hint([], "clear", "正在核对手动落子")
+                candidates = [candidate for candidate in legal if apply_move(self.expected, candidate) == board]
+                if len(candidates) == 1:
+                    added = candidates
+                else:
+                    # A fast computer reply can arrive before the next capture.
+                    # Use the visible history to identify both moves, then verify
+                    # their legality and resulting full board before committing.
+                    rows, ply = self.view.history(observation)
+                    count = min(2, len(self.moves))
+                    if (ply != len(self.moves)+2 or len(rows) < count+2 or
+                            (count and rows[-count-2:-2] != self.moves[-count:])):
+                        raise ValueError("手动落子后的棋谱不能接续已核对历史")
+                    added = rows[-2:]
+                    if (added[0] not in legal or
+                            added[1] not in self.engine.legal(self.moves+[added[0]]) or
+                            apply_move(apply_move(self.expected, added[0]), added[1]) != board):
+                        raise ValueError("手动落子及电脑应手不能与棋盘核对")
+                self.moves = self.moves + added
+                self.expected = board
+                self.save_checkpoint()
+                self.view.record_frame(observation)
+                self.view.record("manual_confirmed", moves=added, ply=len(self.moves))
+                self.session.emit_log("手动落子已核对：" + "、".join(added))
+                self.check_finished(observation)
+                return
+        finally:
+            self.session.emit_hint([], "clear", "已结束本手提示")
+
     def run(self):
         self.initialize()
         while True:
@@ -319,12 +392,17 @@ class Game:
                 raise ValueError("玩家无合法走法，网页终局仍需核对")
             self.session.emit_status("选招中","皮卡鱼正在分析","分析期间可停止")
             self.view.record("search_started",ply=len(self.moves))
-            move=self.engine.search(self.moves)
+            move=self.engine.search(self.moves, self.think_time_ms)
             if move is None or move not in legal:
                 raise ValueError("引擎未提供已验证的合法走法")
             observation=self.checkpoint()
             _,board,origin,selected=observation
             self.view.mark_move(observation,move,len(self.moves))
+            self.check_stop()
+            self.apply_parameters()
+            if self.mode == "hint":
+                self.wait_player(move, legal)
+                continue
             self.view.click(origin,move[:2],ply=len(self.moves))
             selected_after=time.perf_counter()
             source=(9-int(move[1]))*9+ord(move[0])-97
@@ -350,6 +428,10 @@ class Game:
             # The same full-board observation confirms both selection and state.
             # Click immediately, retaining cancellation and the window refresh.
             self.check_stop()
+            self.apply_parameters()
+            if self.mode == "hint":
+                self.wait_player(move, legal)
+                continue
             self.view.click(origin,move[2:],ply=len(self.moves))
             self.confirm_player(move)
 

@@ -46,8 +46,8 @@ class TaskPresentationCoordinator(QtCore.QObject):
     status_changed = QtCore.Signal(str, str, str, bool)
     parameters_requested = QtCore.Signal(str)
     runtime_parameters_requested = QtCore.Signal(dict)
-    runtime_transparency_changed = QtCore.Signal(bool, bool)
-    runtime_transparency_preference_changed = QtCore.Signal(bool)
+    runtime_transparency_changed = QtCore.Signal(bool, int)
+    runtime_transparency_preference_changed = QtCore.Signal(int)
     edit_skill_requested = QtCore.Signal(str)
     promote_task_requested = QtCore.Signal(str)
 
@@ -101,8 +101,8 @@ class TaskPresentationCoordinator(QtCore.QObject):
         self._strip.stop_requested.connect(self.stop_task_requested)
         self._strip.pause_requested.connect(self.pause_task_requested)
         self._strip.parameters_changed.connect(self.runtime_parameters_requested)
-        self._strip.transparency.toggled.connect(self._sync_strip)
-        self._strip.transparency.toggled.connect(self.runtime_transparency_preference_changed)
+        self._strip.transparency.valueChanged.connect(self._sync_strip)
+        self._strip.transparency.valueChanged.connect(self.runtime_transparency_preference_changed)
 
         self._auto_hide_timer = QtCore.QTimer(self)
         self._auto_hide_timer.setSingleShot(True)
@@ -263,8 +263,8 @@ class TaskPresentationCoordinator(QtCore.QObject):
     def set_runtime_enabled(self, enabled: bool) -> None:
         self._strip.set_runtime_enabled(enabled)
 
-    def set_runtime_transparent(self, transparent: bool) -> None:
-        self._strip.transparency.setChecked(transparent)
+    def set_runtime_transparency(self, transparency: int) -> None:
+        self._strip.transparency.setValue(transparency)
 
     def runtime_update_pending(self) -> None:
         if self._strip.runtime_popup is not None:
@@ -284,7 +284,7 @@ class TaskPresentationCoordinator(QtCore.QObject):
 
     def _sync_strip(self) -> None:
         self._strip.transparency.setEnabled(self._running)
-        self.runtime_transparency_changed.emit(self._running, self._strip.transparency.isChecked())
+        self.runtime_transparency_changed.emit(self._running, self._strip.transparency.value())
         active = self._running or self._result_pending
         if active:
             quiet = self._running and self._status_title != "停止中" and not self._task_preferences.get(self._selected_id, {}).get("show_logs", True)
@@ -375,7 +375,7 @@ class TaskPresentationCoordinator(QtCore.QObject):
     def close(self) -> None:
         if self._closed:
             return
-        self.runtime_transparency_changed.emit(False, self._strip.transparency.isChecked())
+        self.runtime_transparency_changed.emit(False, self._strip.transparency.value())
         self._clear_bubbles()
         self._result_hide_timer.stop()
         self._strip.close()

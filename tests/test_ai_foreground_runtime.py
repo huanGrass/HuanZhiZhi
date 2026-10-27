@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from huanzhizhi.agents import runtime as ai_runtime
 from huanzhizhi.task_sdk import input_result_path
-from huanzhizhi.tasks.protocol import InputRequestEvent, ProtocolError
+from huanzhizhi.tasks.protocol import HintEvent, InputRequestEvent, ProtocolError
 
 
 REQUEST_ID = 'a' * 32
@@ -115,6 +115,55 @@ class AgentInputLifecycleTests(unittest.TestCase):
         self.process.wait.side_effect = finish
         self.assertEqual(self.run_agent(), 0)
         self.worker.input_request.emit.assert_not_called()
+
+    def test_smooth_background_environment_and_click_feedback_are_forwarded(self):
+        self.worker.input_mode = 'background_smooth'
+        self.events = [dict(protocol_version=1, type='point', x=400, y=300)]
+        self.assertEqual(self.run_agent(), 0)
+        self.assertEqual(self.popen.call_args.kwargs['env']['HUANZHIZHI_INPUT_MODE'], 'background_smooth')
+        self.worker.click_point.emit.assert_called_once_with(400, 300)
+        self.worker.input_request.emit.assert_not_called()
+
+    def test_trial_hint_reaches_host_without_sending_input(self):
+        self.events = [dict(protocol_version=1, type='hint', kind='line',
+                            points=[[100, 200], [300, 400]], label='走法')]
+        self.assertEqual(self.run_agent(), 0)
+        self.assertEqual(self.worker.hint_events, self.turn / 'host_hints.jsonl')
+        self.assertTrue(self.worker.hint_events.is_file())
+        self.worker.hint.emit.assert_called_once_with(HintEvent('line', ((100, 200), (300, 400)), '走法'))
+        self.worker.input_request.emit.assert_not_called()
+        self.worker.click_point.emit.assert_not_called()
+
+    def test_final_drain_discards_new_hint_but_allows_clear(self):
+        def finish(**kwargs):
+            self.append(dict(protocol_version=1, type='hint', kind='line',
+                             points=[[100, 200], [300, 400]], label='过期'),
+                        dict(protocol_version=1, type='hint', kind='clear', points=[], label='结束'))
+            return 0
+        self.process.wait.side_effect = finish
+        self.assertEqual(self.run_agent(), 0)
+        self.worker.hint.emit.assert_called_once_with(HintEvent('clear', (), '结束'))
+
+    def test_read_only_observation_cannot_display_hint(self):
+        self.events = [dict(protocol_version=1, type='hint', kind='line',
+                            points=[[100, 200], [300, 400]], label='走法')]
+        with self.assertRaises(ai_runtime.AgentTaskError):
+            ai_runtime.run_agent(self.worker, ['fixture-agent'], self.turn,
+                                 stdout_name='stdout.txt', allow_input=False)
+        self.worker.hint.emit.assert_not_called()
+
+    def test_smooth_background_request_waits_for_host_acknowledgement(self):
+        self.worker.input_mode = 'background_smooth'
+        self.events = [REQUEST]
+
+        def acknowledge(event, reply):
+            self.assertFalse(self.reply.exists())
+            reply()
+            self.assertIsNone(json.loads(self.reply.read_bytes())['error'])
+
+        self.worker.input_request.emit.side_effect = acknowledge
+        self.assertEqual(self.run_agent(), 0)
+        self.worker.input_request.emit.assert_called_once()
 
     def test_process_exit_cancels_pending_action_and_ignores_late_reply(self):
         self.events = [REQUEST]

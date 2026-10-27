@@ -35,6 +35,20 @@ class HintOverlayTests(unittest.TestCase):
             session.emit_hint([(10,20),(300,450)],'line','辅助线')
             self.assertEqual(parse_event_line(json.dumps({'protocol_version':1,**emit.call_args.kwargs,'type':'hint'})).points,((10,20),(300,450)))
 
+    def test_action_hints_preserve_kind_path_and_duration_with_legacy_default(self):
+        session = object.__new__(TaskSession)
+        for kind, points in (('right_click', [(10,20)]), ('double_click', [(10,20)]),
+                             ('drag', [(10,20),(300,450)])):
+            with self.subTest(kind=kind), mock.patch.object(session, '_emit_event') as emit:
+                session.emit_hint(points, kind, '动作', duration=.8)
+                payload = dict(protocol_version=1, type='hint', **emit.call_args.kwargs)
+                event = parse_event_line(json.dumps(payload))
+                self.assertEqual((event.kind,event.points,event.duration), (kind,tuple(points),.8))
+                self.assertEqual(parse_event_line(json.dumps({k:v for k,v in payload.items() if k!='duration'})).duration,.5)
+                for duration in (True, 0, 6, float('nan')):
+                    with self.assertRaises(ProtocolError):
+                        parse_event_line(json.dumps({**payload,'duration':duration}))
+
     def test_line_renders_without_sprite_and_expires_quickly(self):
         overlay=PointOverlayWindow()
         try:

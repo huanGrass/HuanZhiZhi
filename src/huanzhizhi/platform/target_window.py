@@ -8,7 +8,9 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from huanzhizhi.platform.window_capture import WgcWindowCapture
-from huanzhizhi.task_sdk import _emit_click_point, _input_mode, _request_foreground_input
+from huanzhizhi.task_sdk import (
+    _emit_action_hint, _emit_click_point, _ensure_input_allowed, _input_mode, _request_foreground_input,
+)
 
 
 WM_MOUSEMOVE = 0x0200
@@ -243,14 +245,26 @@ class Win32DesktopApi:
             raise DesktopWindowsError("captured image conversion produced unexpected mode or size")
         return image
 
-    def post_click(self, info: WindowInfo, x: int, y: int, action='click', *, wait=time.sleep) -> None:
-        """Click once through the shared pet-feedback path; coordinates are client pixels."""
+    def post_click(self, info: WindowInfo, x: int, y: int, action='click', *, wait=time.sleep,
+                   hint: bool = False, label: str | None = None) -> None:
+        """Perform or visually demonstrate the same click in client coordinates.
+
+        hint=True sends no mouse input; call again only after a fresh observation
+        confirms the action. Returning does not confirm the business result.
+        """
         fresh = self._require_unchanged(info)
         x = _client_coordinate(x, "x", fresh.width)
         y = _client_coordinate(y, "y", fresh.height)
         if action not in ('click', 'right_click', 'double_click'):
             raise ValueError('Unsupported click action')
-        if _input_mode() == 'foreground':
+        if not isinstance(hint, bool):
+            raise TypeError('hint 必须是布尔值')
+        if hint:
+            _emit_action_hint([(fresh.left+x, fresh.top+y)], action,
+                              label if label is not None else {'click': '点击此处', 'right_click': '右键点击此处',
+                                                               'double_click': '双击此处'}[action])
+            return
+        if _input_mode() in ('foreground', 'background_smooth'):
             _request_foreground_input(asdict(fresh), action, x, y)
             return
         lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
@@ -270,18 +284,26 @@ class Win32DesktopApi:
                 self._post_input(fresh, WM_LBUTTONUP, 0, lparam)
 
     def _post_input(self, info, message, wparam, lparam):
+        _ensure_input_allowed()
         result = self._call('post input', 'post_message', info.hwnd, message, wparam, lparam)
         if result is not True:
             raise DesktopWindowsError(f'PostMessage failed: {message:#x}')
 
-    def post_drag(self, info, x, y, end_x, end_y, duration=.5, *, wait=time.sleep):
+    def post_drag(self, info, x, y, end_x, end_y, duration=.5, *, wait=time.sleep,
+                  hint: bool = False, label: str | None = None):
         fresh = self._require_unchanged(info)
         x, y = _client_coordinate(x, 'x', fresh.width), _client_coordinate(y, 'y', fresh.height)
         end_x = _client_coordinate(end_x, 'end_x', fresh.width)
         end_y = _client_coordinate(end_y, 'end_y', fresh.height)
         if type(duration) not in (int, float) or not .1 <= duration <= 5:
             raise ValueError('Invalid drag duration')
-        if _input_mode() == 'foreground':
+        if not isinstance(hint, bool):
+            raise TypeError('hint 必须是布尔值')
+        if hint:
+            _emit_action_hint([(fresh.left+x, fresh.top+y), (fresh.left+end_x, fresh.top+end_y)],
+                              'drag', label if label is not None else '从起点拖动到终点', duration=duration)
+            return
+        if _input_mode() in ('foreground', 'background_smooth'):
             _request_foreground_input(asdict(fresh), 'drag', x, y, end_x, end_y, duration)
             return
         packed = (y << 16) | x

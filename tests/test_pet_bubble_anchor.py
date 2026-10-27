@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from huanzhizhi.application import HuanZhiZhiApplication
 from huanzhizhi.tasks.presentation import TaskListItem
@@ -55,6 +55,52 @@ class PetBubbleAnchorTests(unittest.TestCase):
                 tuple(bubble.geometry() for bubble in self.presentation._bubbles),
                 self.host.chat.toggle_button.geometry(), self.host.chat._pet_rect)
 
+    def test_layout_centers_on_body_anchor_in_both_directions(self):
+        for theme in ('ufo', 'broom'):
+            actor = self.prepare_theme(theme)
+            for scale in (.19, .32, .56, 1.25):
+                actor.set_display_scale(scale)
+                for ratio in (1., 2.):
+                    with patch.object(self.pet.window, 'devicePixelRatioF', return_value=ratio):
+                        for mirrored in (False, True):
+                            with self.subTest(theme=theme, scale=scale, ratio=ratio, mirrored=mirrored):
+                                actor._render(0, QtCore.QPointF(400, 350), mirrored)
+                                body_x = (self.pet.window.x() + actor._prepared(0, mirrored)[2].x())
+                                self.assertLessEqual(abs(self.pet.bubble_geometry().center().x()-body_x), 1)
+                                if theme != 'broom':
+                                    idle_bounds = actor._prepared(0, mirrored)[1].boundingRect().translated(self.pet.window.pos())
+                                    self.assertEqual(self.pet.task_menu_geometry(), idle_bounds)
+                                actor._home = self.pet.window.pos()
+                                actor._home_mirrored = mirrored
+                                self.assertLessEqual(abs(actor.home_anchor_geometry.center().x()-body_x), 1)
+
+    def test_ufo_menu_gaps_match_without_covering_either_orientation(self):
+        actor = self.prepare_theme('ufo')
+        self.presentation.set_tasks(TaskListItem(str(i), title) for i, title in
+                                    enumerate(('桌宠排球', '微信象棋连续对弈', '象棋共用动作新建')))
+        self.presentation.handle_pet_clicked()
+        for mirrored in (False, True, False):
+            with self.subTest(mirrored=mirrored):
+                actor._render(0, QtCore.QPointF(400, 350), mirrored)
+                for bubble in self.presentation._bubbles:
+                    bubble._stop_pop_animation()
+                body_x = self.pet.window.x() + actor._prepared(0, mirrored)[2].x()
+                self.assertLessEqual(abs(self.host.chat.toggle_button.geometry().center().x()-body_x), 1)
+                painted = actor._prepared(0, mirrored)[1].translated(self.pet.window.pos())
+                bounds = painted.boundingRect()
+                left, right = self.presentation._bubbles[:2]
+                left_gap = bounds.left()-left.geometry().right()-1
+                right_gap = right.x()-bounds.right()-1
+                self.assertGreaterEqual(left_gap, 0)
+                self.assertGreaterEqual(right_gap, 0)
+                self.assertEqual(left_gap, right_gap)
+                for bubble in self.presentation._bubbles:
+                    self.assertTrue(painted.intersected(QtGui.QRegion(bubble.geometry())).isEmpty())
+                baseline = tuple(b.geometry() for b in self.presentation._bubbles)
+                for frame in (1, 10, 11, 12, 13, 18, 0):
+                    actor._render(frame, QtCore.QPointF(400, 350), mirrored)
+                    self.assertEqual(tuple(b.geometry() for b in self.presentation._bubbles), baseline)
+
     def test_stationary_pose_and_turn_keep_speech_status_and_task_bubbles_fixed(self):
         for theme in ('ufo', 'broom'):
             with self.subTest(theme=theme):
@@ -69,8 +115,9 @@ class PetBubbleAnchorTests(unittest.TestCase):
                 self.assertTrue(self.pet.speech_bubble.isVisible())
                 pivot = QtCore.QPointF(actor._pivot)
                 baseline = self.snapshot()
-                for frame, mirrored in ((1, False), (2, False), (5, False), (9, False),
-                                        (10, False), (12, False), (13, False), (22, False),
+                for frame, mirrored in ((1, False), (7, False), (9, False),
+                                        (10, False), (11, False), (12, False), (13, False),
+                                        (18, False), (19, False), (22, False),
                                         (0, True), (1, True), (0, False)):
                     with self.subTest(frame=frame, mirrored=mirrored):
                         actor._render(frame, pivot, mirrored)
@@ -81,7 +128,7 @@ class PetBubbleAnchorTests(unittest.TestCase):
         self.pet.show_notification('气泡定位复现：姿势变化时应保持稳定', duration_ms=60000)
         baseline = (self.pet.speech_bubble.geometry(), self.pet.speech_bubble.tail_edge)
         pivot = QtCore.QPointF(actor._pivot)
-        for frame in (1, 2, 0):
+        for frame in (1, 0):
             actor._render(frame, pivot, False)
             self.assertEqual((self.pet.speech_bubble.geometry(), self.pet.speech_bubble.tail_edge), baseline)
 
@@ -102,7 +149,7 @@ class PetBubbleAnchorTests(unittest.TestCase):
 
         baseline = state()
         pivot = QtCore.QPointF(actor._pivot)
-        for frame, mirrored in ((1, False), (2, False), (12, False), (22, True), (0, True)):
+        for frame, mirrored in ((1, False), (7, False), (12, False), (22, True), (0, True)):
             actor._render(frame, pivot, mirrored)
             # Visibility refresh also uses the same anchor as the move signal.
             self.host._sync_chat_visibility()

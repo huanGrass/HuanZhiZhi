@@ -22,6 +22,15 @@ def records(*items):
 
 
 class OpenCodeAdapterTests(unittest.TestCase):
+    def test_rate_limit_does_not_claim_quota_exhaustion(self):
+        message = adapter.failure_message({'type': 'provider.rate_limit', 'status': 429, 'message': 'Too many requests'})
+        self.assertIn('HTTP 429', message)
+        self.assertNotIn('额度', message)
+        self.assertNotIn('用量', message)
+        quota = {'type': 'provider.quota', 'status': 429, 'message': 'Free usage limit reached.'}
+        self.assertIn('服务提示已达到免费用量限制', adapter.failure_message(quota))
+        self.assertIn('服务提示已达到免费用量限制', adapter.failure_message({'data': quota}))
+
     def test_zero_exit_with_provider_error_is_not_success(self):
         text = records({'type': 'error', 'error': {'type': 'provider.auth', 'status': 403,
                         'message': "OpenCode's free tier can only be used from within OpenCode."}})
@@ -60,12 +69,14 @@ class OpenCodeAdapterTests(unittest.TestCase):
     def test_free_catalog_filters_paid_unknown_cost_and_disabled_models_and_drops_secrets(self):
         base = {'providerID': 'opencode', 'enabled': True, 'status': 'active',
                 'capabilities': {'tools': True, 'input': ['text', 'image']},
-                'cost': [{'input': 0, 'output': 0}], 'settings': {'apiKey': 'secret'}}
+                'cost': [{'input': 0, 'output': 0}], 'settings': {'apiKey': 'secret'},
+                'variants': [{'id': 'high', 'settings': {'reasoningEffort': 'high', 'apiKey': 'secret'}}]}
         items = [dict(base, id='free', name='Free'), dict(base, id='paid', cost=[{'input': 0, 'output': 1}]),
                  dict(base, id='unknown', cost=[]), dict(base, id='disabled', enabled=False),
                  dict(base, id='text-only', capabilities={'tools': True, 'input': ['text']})]
         with patch.object(adapter, 'invoke', return_value=json.dumps({'data': items})):
-            self.assertEqual(adapter.free_models('opencode.exe'), [{'id': 'opencode/free', 'name': 'Free', 'image': True}])
+            self.assertEqual(adapter.free_models('opencode.exe'), [
+                {'id': 'opencode/free', 'name': 'Free', 'image': True, 'efforts': ['high']}])
         with patch.object(adapter, 'free_models', return_value=[]):
             with self.assertRaisesRegex(SettingsError, '不会切换到付费模型'):
                 adapter.require_free_model('opencode.exe', 'opencode/free')
@@ -85,6 +96,26 @@ class OpenCodeAdapterTests(unittest.TestCase):
             self.assertEqual(merged['providers'], original['providers'])
             self.assertEqual(merged['permissions'][0], original['permissions'][0])
             self.assertEqual(json.loads(os.environ['OPENCODE_CONFIG_CONTENT']), original)
+
+    def test_reasoning_variant_reaches_new_resume_observation_and_probe_commands(self):
+        options = dict(adapter.DEFAULT_OPTIONS, model='opencode/free', reasoning_effort='high')
+        for kwargs in ({}, {'thread_id': 'ses_existing'}, {'observation_image': Path('image.png')}, {'probe': True}):
+            command = adapter.build_command('opencode.exe', options, **kwargs)
+            self.assertEqual(command[command.index('--model') + 1], 'opencode/free#high')
+        options['reasoning_effort'] = ''
+        command = adapter.build_command('opencode.exe', options)
+        self.assertEqual(command[command.index('--model') + 1], 'opencode/free')
+        for invalid in ('high#other', 'high effort', None, 3):
+            with self.assertRaises(SettingsError):
+                adapter.build_command('opencode.exe', dict(options, reasoning_effort=invalid))
+
+    def test_removed_variant_is_rejected_before_model_request(self):
+        with patch.object(adapter, 'free_models', return_value=[{'id': 'opencode/free', 'efforts': ['low']}]), \
+                patch.object(adapter, 'check_configuration', return_value='opencode.exe'), \
+                patch.object(adapter, 'invoke') as invoke:
+            with self.assertRaisesRegex(SettingsError, '推理强度'):
+                adapter.test_connection(dict(adapter.DEFAULT_OPTIONS, model='opencode/free', reasoning_effort='high'))
+            invoke.assert_not_called()
 
     def test_v2_missing_finish_is_confirmed_from_session_not_assumed_from_text(self):
         text = records({'type': 'step_finish', 'part': {'reason': 'tool-calls', 'cost': 0}},
@@ -255,6 +286,58 @@ class OpenCodeGuideTests(unittest.TestCase):
         self.assertFalse(self.settings.is_opencode_verified())
         with self.assertRaises(SettingsError):
             self.settings.set_ai_enabled(True)
+
+    def test_reasoning_selection_persists_and_tracks_model_capabilities_and_busy_state(self):
+        self.settings.set_agent_tool('opencode')
+        self.settings.set_opencode_options(dict(adapter.DEFAULT_OPTIONS, model='opencode/free'))
+        self.settings.set_opencode_model_cache([
+            dict(id='opencode/free', name='Free', image=True, efforts=['low', 'high']),
+            dict(id='opencode/other', name='Other', image=True, efforts=[]),
+        ])
+        self.guide.refresh()
+        self.assertTrue(self.guide.reasoning_combo.isEnabled())
+        self.settings.mark_opencode_verified(self.settings.get_opencode_options())
+        self.guide.reasoning_combo.setCurrentIndex(self.guide.reasoning_combo.findData('high'))
+        self.guide.reasoning_combo.activated.emit(self.guide.reasoning_combo.currentIndex())
+        self.assertEqual(self.settings.get_opencode_options()['reasoning_effort'], 'high')
+        self.assertFalse(self.settings.is_opencode_verified())
+        reopened = SettingsComponent(self.settings.path)
+        try:
+            self.assertEqual(reopened.get_opencode_options()['reasoning_effort'], 'high')
+            self.assertEqual(reopened.get_opencode_model_cache()[0]['efforts'], ['low', 'high'])
+        finally:
+            reopened.close()
+        self.settings.ai_work_active = lambda: True
+        self.guide.update_controls()
+        self.assertFalse(self.guide.reasoning_combo.isEnabled())
+        with self.assertRaises(SettingsError):
+            self.settings.set_opencode_options(dict(self.settings.get_opencode_options(), reasoning_effort='low'))
+        self.settings.ai_work_active = lambda: False
+        self.guide.model_combo.setCurrentIndex(1)
+        self.assertEqual(self.settings.get_opencode_options()['reasoning_effort'], '')
+        self.assertFalse(self.guide.reasoning_combo.isEnabled())
+        self.assertIn('未提供可调档位', self.guide.reasoning_combo.currentText())
+
+    def test_legacy_settings_keep_default_and_verification_but_refresh_old_catalog(self):
+        legacy = {'executable': '', 'model': 'opencode/free'}
+        store = self.settings._open_settings()
+        store.setValue('opencodeOptions', json.dumps(legacy))
+        store.setValue('opencodeVerifiedOptions', json.dumps(legacy, sort_keys=True))
+        self.assertEqual(self.settings.get_opencode_options()['reasoning_effort'], '')
+        self.assertTrue(self.settings.is_opencode_verified())
+        self.settings.set_opencode_model_cache([dict(id='opencode/free', name='Free', image=True)])
+        cache = json.loads(store.value('opencodeModelCache'))
+        del cache['models'][0]['efforts']
+        store.setValue('opencodeModelCache', json.dumps(cache))
+        self.assertEqual(self.settings.get_opencode_model_cache(), [])
+        with patch.object(adapter, 'check_configuration', return_value='opencode.exe'), \
+                patch.object(adapter, 'free_models', return_value=[
+                    dict(id='opencode/free', name='Free', image=True, efforts=['high'])]) as models:
+            self.guide.show()
+            self.finish()
+            models.assert_called_once()
+        self.assertGreaterEqual(self.guide.reasoning_combo.findData('high'), 0)
+        self.assertTrue(self.settings.is_opencode_verified())
 
 
 class OpenCodeInstallTests(unittest.TestCase):

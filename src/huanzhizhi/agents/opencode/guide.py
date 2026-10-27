@@ -56,6 +56,8 @@ class OpenCodeGuide(QtWidgets.QWidget):
         self.model_combo = ComboBox()
         self.model_combo.setAccessibleName('OpenCode 免费模型')
         self.model_combo.setToolTip('免费模型的可用性与额度由服务商决定。')
+        self.reasoning_combo = ComboBox()
+        self.reasoning_combo.setAccessibleName('OpenCode 推理强度')
         actions = QtWidgets.QHBoxLayout()
         self.install_button = QtWidgets.QPushButton('安装 OpenCode')
         self.detect_button = QtWidgets.QPushButton('重试')
@@ -93,6 +95,7 @@ class OpenCodeGuide(QtWidgets.QWidget):
         self.detect_button.clicked.connect(lambda: self.start('detect'))
         self.browse_button.clicked.connect(self.browse)
         self.model_combo.currentIndexChanged.connect(self.save_model)
+        self.reasoning_combo.activated.connect(self.save_reasoning)
         self.cancel_button.clicked.connect(self.cancel)
         self.refresh()
 
@@ -103,8 +106,10 @@ class OpenCodeGuide(QtWidgets.QWidget):
         if not self._models and self.settings:
             self._models = self.settings.get_opencode_model_cache()
         self._fill_models(options['model'])
+        self._fill_efforts(options['reasoning_effort'], preserve=self.model_combo.currentData() == options['model'])
         if self._models and self.model_combo.currentData() != options['model'] and not self.settings.ai_work_active():
             options['model'] = self.model_combo.currentData()
+            options['reasoning_effort'] = self.reasoning_combo.currentData()
             self.settings.set_opencode_options(options)
             self.settings.sync()
         self.update_controls()
@@ -126,6 +131,18 @@ class OpenCodeGuide(QtWidgets.QWidget):
         index = self.model_combo.findData(selected)
         self.model_combo.setCurrentIndex(index if index >= 0 else 0)
         self.model_combo.blockSignals(False)
+
+    def _fill_efforts(self, selected, *, preserve=False):
+        model = next((m for m in self._models if m['id'] == self.model_combo.currentData()), None)
+        efforts = model.get('efforts', []) if model else []
+        self.reasoning_combo.clear()
+        self.reasoning_combo.addItem('默认' if efforts else '默认（模型未提供可调档位）', '')
+        for effort in efforts:
+            self.reasoning_combo.addItem(effort, effort)
+        if preserve and selected and selected not in efforts:
+            self.reasoning_combo.addItem(selected + '（当前不可用）', selected)
+        index = self.reasoning_combo.findData(selected)
+        self.reasoning_combo.setCurrentIndex(index if index >= 0 else 0)
 
     def enable(self):
         if not self.model_combo.currentData():
@@ -151,6 +168,7 @@ class OpenCodeGuide(QtWidgets.QWidget):
             self.location.setText('程序：' + path)
             self.location.setToolTip(path)
         self.model_combo.setEnabled(available and bool(self._models))
+        self.reasoning_combo.setEnabled(available and bool(self._models) and self.reasoning_combo.count() > 1)
         self.detect_button.setVisible(self._failed)
         self.program_toggle.setVisible(self._failed)
         if not self._failed:
@@ -169,7 +187,7 @@ class OpenCodeGuide(QtWidgets.QWidget):
         self.worker = _SetupWorker(action, options, self)
         self.worker.progress.connect(self.status.setText)
         self.worker.finished.connect(self.finished)
-        self.status.setText('正在连接，请稍候…' if action in ('test', 'enable') else '正在加载可用模型…')
+        self.status.setText('正在测试模型连接，请稍候…' if action in ('test', 'enable') else '正在加载可用模型…')
         self.update_controls()
         self.busy_changed.emit()
         self.worker.start()
@@ -200,7 +218,9 @@ class OpenCodeGuide(QtWidgets.QWidget):
                     options['executable'] = worker.result['executable']
                 self._models = worker.result['models']
                 self._fill_models(options['model'])
+                self._fill_efforts(options['reasoning_effort'], preserve=self.model_combo.currentData() == options['model'])
                 options['model'] = self.model_combo.currentData() or ''
+                options['reasoning_effort'] = self.reasoning_combo.currentData()
                 self.settings.set_opencode_options(options)
                 self.settings.set_opencode_model_cache(self._models)
                 self.settings.sync()
@@ -217,11 +237,16 @@ class OpenCodeGuide(QtWidgets.QWidget):
             self.busy_changed.emit()
 
     def save_model(self):
+        self._fill_efforts(self.reasoning_combo.currentData() or '')
+        self.save_reasoning()
+
+    def save_reasoning(self):
         if not self.settings or self.worker is not None:
             return
         try:
             options = self.settings.get_opencode_options()
             options['model'] = self.model_combo.currentData() or ''
+            options['reasoning_effort'] = self.reasoning_combo.currentData() or ''
             self.settings.set_opencode_options(options)
             self.settings.sync()
             self.status.setText('')

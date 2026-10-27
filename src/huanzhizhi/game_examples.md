@@ -102,9 +102,11 @@ go.play(session, observe=site.observe, click=site.click, point=site.point,
 
 `START` 是标准开局的 90 格列表，从左上角逐行排列，每行 9 格：`.` 为空，`rnbakcp` 表示黑方车、马、象、士、将、炮、卒，大写为红方。走法用皮卡鱼坐标，例如 `b2e2`。`apply_move(board, move)` 返回移动或吃子后的副本，检查起点非空、目标不是己方；它不是完整规则引擎，调用前必须用 `Engine.legal(moves)` 核对合法性。
 
-`xiangqi.check_engine()` 复用共享组件的引擎、模型和实际搜索检查，用于 `describe(__file__, environment_checks={"皮卡鱼": xiangqi.check_engine})`。`Engine(session, record)` 沿用共享依赖路径，整局复用一个皮卡鱼进程与 NNUE；`legal(moves)` 查询合法走法，`search(moves)` 搜索 500 毫秒并返回走法或 `None`，`close()` 回收线程和管道。请求按顺序发送，等待可停止、单次响应有 12 秒上限；必须在 `finally` 中关闭。
+`xiangqi.check_engine()` 复用共享组件的引擎、模型和实际搜索检查，用于 `describe(__file__, environment_checks={"皮卡鱼": xiangqi.check_engine})`。`Engine(session, record)` 沿用共享依赖路径，整局复用一个皮卡鱼进程与 NNUE；`legal(moves)` 查询合法走法，`search(moves, think_time_ms=500)` 按指定毫秒数搜索并返回走法或 `None`，范围为 100～60000；`close()` 回收线程和管道。请求按顺序发送，等待可停止；普通响应上限为 12 秒，搜索响应上限取 12 秒与思考时间加 5 秒中的较大值。必须在 `finally` 中关闭。
 
-`Game(session, view, *, checkpoint_file)` 从已确认的标准开局历史继续自动执红，负责历史重放与持久化、暂停恢复核对、回合推进、搜索、选中确认、落子及快速应手核对、超时和停止。当前没有增加执黑、提示模式、任意 FEN 接管或自动重开功能。`view` 是技能自己的具体对象，不继承公共基类，不注册到框架：
+从已确认的中途局面接手时，可调用 `Engine(session, record, initial_fen=fen)`；此时 `moves` 是相对于该局面的真实已确认走法，默认不传仍从标准开局搜索。技能负责把本地识别状态转换为 FEN、核对后续实际走法和保存必要历史，无需另写引擎子类。
+
+`Game(session, view, *, checkpoint_file, think_time_ms=500, mode="auto")` 从已确认的标准开局历史继续执红，负责历史重放与持久化、暂停恢复核对、回合推进、搜索、选中确认、落子及快速应手核对、超时和停止。`mode="hint"` 仅提示，由用户手动落子。技能可将 `think_time_ms` 和 `mode` 声明为 `runtime: true`；控制器在等待和点击前应用 SDK 参数更新，思考时间从下一次分析生效，当前分析先完成。仅提示切回自动会清除提示并重新核对棋盘后选招。手动等待无超时，电脑应手上限为 60 秒。`view` 是技能自己的具体对象，不继承公共基类，不注册到框架：
 
 ```python
 state = session.runtime_dir / "state"
@@ -125,8 +127,9 @@ finally:
 - `initial_history(observation)` 返回可见走法、总半回合数、是否可见开局起始标记、诊断依据；先核实页面方向、玩家颜色及开局设置。`history(observation)` 返回可见走法和总半回合数。完整历史验证、检查点续接与合法性重放由公共模块执行；缺失或冲突时停止，不编造历史。
 - `click(layout, square, *, ply)` 把棋盘坐标转换为客户区像素，检查停止与窗口有效性后调用宿主输入。`finish_reason(observation, moves, legal)` 核实网页终局标记与引擎结果一致，再返回网站特有的结束原因或 `None`。四次重复、无进攻子力等当前网页规则留在网站适配中，不作为通用象棋规则。
 - `record(event, **data)`、`record_frame(observation)`、`mark_move(observation, move, ply)` 保留技能自己的日志和截图留证。预标注在点选之前，正常落子留证在确认之后；点选到落点之间不保存截图。
+- 仅提示模式需要 `hint(observation, move)`，使用当前观察的坐标映射，通过 `session.emit_hint` 标出建议起终点，不发送输入。棋盘未变时更新提示位置；手动落子按合法棋盘变化核对，快速应手时额外读取棋谱并验证双方走法及最终棋盘，允许用户选择其他合法走法。暂停、停止或异常时清除提示。
 
-启动和暂停恢复时核对网页棋谱；正常回合由完整棋盘及唯一合法走法推进，不反复读取文字棋谱。点选后一次新鲜、明确的观察同时核对棋盘、输入映射和唯一选中棋子；随后检查停止再点击落点，不额外重复全盘识别。模糊反馈只观察、限时等待，不能误点；确认超时不重复点击。网站的识别阈值、截图区域、窗口规则和错误截图仍在独立技能中。
+启动和暂停恢复时核对网页棋谱；自动模式的正常回合由完整棋盘及唯一合法走法推进，不反复读取文字棋谱。点选后一次新鲜、明确的观察同时核对棋盘、输入映射和唯一选中棋子；随后检查停止再点击落点，不额外重复全盘识别。模糊反馈只观察、限时等待，不能误点；确认超时不重复点击。网站的识别阈值、截图区域、窗口规则和错误截图仍在独立技能中。
 
 ## 分发与修改范围
 

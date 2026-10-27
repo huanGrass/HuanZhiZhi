@@ -128,13 +128,14 @@ class HuanZhiZhiApplication:
         self.chat.log_message.connect(self._append_log)
         self.chat.ai_unavailable.connect(self._show_ai_unavailable)
         self.chat.click_point.connect(self.tasks.show_click_point)
+        self.chat.hint_requested.connect(self.tasks.show_hint)
         self.chat.foreground_input_requested.connect(self._start_agent_input)
         self.chat.foreground_input_cancelled.connect(self.pet.cancel_foreground_input)
         self.chat.foreground_input_stop_requested.connect(self.pet.cancel_foreground_input)
         self.chat.tasks_requested.connect(self._show_tasks_after_exploration)
         self.tasks.presentation.edit_skill_requested.connect(self._edit_skill)
-        self.tasks.presentation.set_runtime_transparent(self.settings.get_runtime_transparent())
-        self.tasks.presentation.runtime_transparency_preference_changed.connect(self._save_runtime_transparent)
+        self.tasks.presentation.set_runtime_transparency(self.settings.get_runtime_transparency())
+        self.tasks.presentation.runtime_transparency_preference_changed.connect(self._save_runtime_transparency)
         self.pet_settings = DesktopPetSettingsComponent(self.pet, self.run_log.path, tasks=self.tasks,
                                                        settings=self.settings)
         self.tasks.presentation.promote_task_requested.connect(self.pet_settings.promote_task)
@@ -206,11 +207,15 @@ class HuanZhiZhiApplication:
                 self.chat._stop_exploration()
 
         if (self._shutting_down or worker is None or self.chat._exploration_stopping
-                or self.tasks.process.state != 'idle' or self.settings.get_input_mode() != 'foreground'):
+                or self.tasks.process.state != 'idle'
+                or self.settings.get_input_mode() not in ('foreground', 'background_smooth')):
             finished(InterruptedError('当前不能开始前台操作'))
             return
         try:
-            self.pet.start_foreground_input(request, finished)
+            if self.settings.get_input_mode() == 'background_smooth':
+                self.pet.start_foreground_input(request, finished, background=True)
+            else:
+                self.pet.start_foreground_input(request, finished)
         except Exception as error:
             finished(error)
 
@@ -447,16 +452,19 @@ class HuanZhiZhiApplication:
         self.settings.set_mouse_point_visible(visible)
         self.settings.sync()
 
-    @QtCore.Slot(bool)
-    def _save_runtime_transparent(self, transparent: bool) -> None:
-        self.settings.set_runtime_transparent(transparent)
+    @QtCore.Slot(int)
+    def _save_runtime_transparency(self, transparency: int) -> None:
+        self.settings.set_runtime_transparency(transparency)
         self.settings.sync()
 
 
     @QtCore.Slot(str)
     def _show_runtime_error(self, message: str, *, on_repair: Callable[[], None] | None = None,
-                            notification_text: str = '出现未知情况',
+                            notification_text: str | None = None,
                             action_text: str = '让 AI 检查并修复') -> None:
+        if notification_text is None:
+            reason = message.strip().removeprefix('任务失败：').removeprefix('任务启动失败：').removeprefix('前台输入失败：').strip()
+            notification_text = reason if len(reason.splitlines()) == 1 and len(reason) <= 120 else '出现未知情况'
         try:
             self._append_log(message)
         except RunLogError as log_error:

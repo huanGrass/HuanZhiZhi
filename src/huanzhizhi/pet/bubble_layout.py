@@ -127,7 +127,7 @@ class BubbleLayoutManager:
         total_height = sum(bubble.height() for bubble in bubbles) + gap * (len(bubbles) - 1)
         y = pet_rect.center().y() - total_height // 2
         side_gap = max(1, round(gap / 4))
-        x = pet_rect.left() - side_gap - max_width if side == "left" else pet_rect.right() + side_gap
+        x = pet_rect.left() - side_gap - max_width if side == "left" else pet_rect.right() + 1 + side_gap
         stack_rect = QtCore.QRect(x, y, max_width, total_height)
         clamped = BubbleLayoutManager._clamped_pos(stack_rect, geometry)
         x, y = clamped.x(), clamped.y()

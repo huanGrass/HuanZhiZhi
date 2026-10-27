@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from huanzhizhi.widgets import BUTTON_STYLE, ComboBox, ToggleSwitch
+from huanzhizhi.widgets import BUTTON_STYLE, TOOL_BUTTON_STYLE, ComboBox, ToggleSwitch
 
 from huanzhizhi.tasks.storage import export_skill
 from huanzhizhi.pet import PetComponent
@@ -19,6 +19,7 @@ from .about import AboutPage
 from .import_skills import ImportSkillsDialog
 from huanzhizhi.agents.codex import adapter as ai_codex
 from huanzhizhi.agents.opencode.guide import OpenCodeGuide
+from huanzhizhi.agents.deepseek.guide import DeepSeekGuide
 from huanzhizhi.agents.runtime import SettingsError
 
 if TYPE_CHECKING:
@@ -145,6 +146,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
                 dialog.stop()
                 dialog.deleteLater()
             self._opencode_guide.stop()
+            self._deepseek_guide.stop()
             self._environment_page.stop()
             self._cloud_page.stop()
             self._about_page.stop()
@@ -241,19 +243,44 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         rows = QtWidgets.QVBoxLayout(card)
         self._ai_switch = ToggleSwitch('启用 AI')
         rows.addLayout(self._row('启用 AI', '关闭后仍可运行已有技能。', self._ai_switch))
-        permissions = QtWidgets.QLabel(
-            'AI 会以你的用户权限执行命令、读写文件，也可能操作鼠标和键盘。'
-            '草稿目录仅通过指令约定，不是强制文件沙箱。'
-            'Codex 使用完整权限且不逐项请求批准；OpenCode 使用自动模式，仍遵守其显式拒绝规则。'
-            '请在了解这些权限后启用 AI。')
+        permissions_row = QtWidgets.QHBoxLayout()
+        permissions = QtWidgets.QLabel('AI 会以你的权限读写文件、执行命令及操作鼠标键盘。')
         permissions.setObjectName('desktopPetSettingsRowDetail')
         permissions.setWordWrap(True)
-        rows.addWidget(permissions)
+        permissions_row.addWidget(permissions, 1)
+        permissions_toggle = QtWidgets.QToolButton()
+        permissions_toggle.setText('权限说明')
+        permissions_toggle.setCheckable(True)
+        permissions_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        permissions_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        permissions_toggle.setStyleSheet(TOOL_BUTTON_STYLE)
+        permissions_row.addWidget(permissions_toggle)
+        rows.addLayout(permissions_row)
+        permissions_details = QtWidgets.QWidget()
+        permissions_layout = QtWidgets.QVBoxLayout(permissions_details)
+        permissions_layout.setContentsMargins(12, 4, 12, 8)
+        permissions_layout.setSpacing(8)
+        for text in (
+            '请在了解以下权限后启用 AI。',
+            'Codex：使用完整权限，不逐项请求批准。草稿目录仅通过指令约定，不是强制文件沙箱。',
+            'OpenCode：使用自动模式，仍遵守其显式拒绝规则。',
+            'DeepSeek Harness：沿用其沙箱配置，需要交互批准的操作不会自动获准。',
+        ):
+            detail = QtWidgets.QLabel(text)
+            detail.setObjectName('desktopPetSettingsRowDetail')
+            detail.setWordWrap(True)
+            permissions_layout.addWidget(detail)
+        permissions_details.hide()
+        permissions_toggle.toggled.connect(permissions_details.setVisible)
+        permissions_toggle.toggled.connect(lambda opened: permissions_toggle.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if opened else QtCore.Qt.ArrowType.RightArrow))
+        rows.addWidget(permissions_details)
         rows.addWidget(self._divider())
         self._agent_combo = ComboBox()
         self._agent_combo.setAccessibleName('AI 工具')
         self._agent_combo.addItem('Codex', 'codex')
         self._agent_combo.addItem('OpenCode（免费体验）', 'opencode')
+        self._agent_combo.addItem('DeepSeek Harness', 'deepseek')
         rows.addLayout(self._row('AI 工具', '切换工具后需重新启用。', self._agent_combo))
         rows.addWidget(self._divider())
         self._codex_fields = QtWidgets.QWidget()
@@ -272,7 +299,15 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._opencode_guide = OpenCodeGuide(self._settings)
         self._opencode_guide.layout().insertLayout(0, self._row(
             '模型', '可直接体验的免费模型。', self._opencode_guide.model_combo))
+        self._opencode_guide.layout().insertLayout(1, self._row(
+            '推理强度', '修改后自动保存。', self._opencode_guide.reasoning_combo))
         rows.addWidget(self._opencode_guide)
+        self._deepseek_guide = DeepSeekGuide(self._settings)
+        self._deepseek_guide.layout().insertLayout(0, self._row(
+            '模型', '使用 DeepSeek Harness 的账号模型。', self._deepseek_guide.model_combo))
+        self._deepseek_guide.layout().insertLayout(1, self._row(
+            '推理强度', '修改后自动保存。', self._deepseek_guide.reasoning_combo))
+        rows.addWidget(self._deepseek_guide)
         layout.addWidget(card)
         self._ai_status = QtWidgets.QLabel()
         self._ai_status.setObjectName('desktopPetSettingsRowDetail')
@@ -289,6 +324,9 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._opencode_guide.changed.connect(self._opencode_changed)
         self._opencode_guide.busy_changed.connect(self._sync_ai_enabled)
         self._window.closed.connect(self._opencode_guide.cancel)
+        self._deepseek_guide.changed.connect(self._opencode_changed)
+        self._deepseek_guide.busy_changed.connect(self._sync_ai_enabled)
+        self._window.closed.connect(self._deepseek_guide.cancel)
         scroll = QtWidgets.QScrollArea()
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
@@ -302,7 +340,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
     def _sync_ai_enabled(self) -> None:
         enabled = self._settings.get_ai_enabled() if self._settings else False
         busy = self._settings.ai_work_active() if self._settings else False
-        busy = busy or self._opencode_guide.worker is not None
+        busy = busy or self._opencode_guide.worker is not None or self._deepseek_guide.worker is not None
         tool = self._settings.get_agent_tool() if self._settings else 'codex'
         self._agent_combo.blockSignals(True)
         self._agent_combo.setCurrentIndex(self._agent_combo.findData(tool))
@@ -311,8 +349,10 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._codex_fields.setVisible(tool == 'codex')
         self._opencode_guide.setVisible(tool == 'opencode')
         self._opencode_guide.update_controls()
+        self._deepseek_guide.setVisible(tool == 'deepseek')
+        self._deepseek_guide.update_controls()
         reason = 'AI 正在工作，请先在对话中停止，结束后可修改设置。'
-        if self._opencode_guide.worker is not None:
+        if self._opencode_guide.worker is not None or self._deepseek_guide.worker is not None:
             reason = '正在准备 AI，请稍候。'
         for control in (self._ai_switch, self._model_combo, self._reasoning_combo):
             control.setEnabled(self._settings is not None and not busy)
@@ -327,6 +367,9 @@ class DesktopPetSettingsComponent(QtCore.QObject):
             'Codex 需自行安装并登录，费用由对应账户承担。')
         if tool == 'opencode' and not busy:
             self._ai_status.setText('AI 已启用。' if enabled else '免费额度与可用性由服务商决定。')
+        elif tool == 'deepseek' and not busy:
+            self._ai_status.setText('AI 已启用。' if enabled else
+                                   '请先在 DeepSeek Harness 中登录，模型调用消耗对应账户额度。')
 
     def _set_agent_tool(self):
         if not self._settings:
@@ -899,6 +942,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._input_mode_combo.setObjectName("desktopPetInputMode")
         self._input_mode_combo.setAccessibleName("操作模式")
         self._input_mode_combo.addItem("后台操作", "background")
+        self._input_mode_combo.addItem("后台操作（平滑移动）", "background_smooth")
         self._input_mode_combo.addItem("前台操作", "foreground")
         self._theme_combo = ComboBox()
         self._theme_combo.setObjectName("desktopPetTheme")
@@ -908,7 +952,7 @@ class DesktopPetSettingsComponent(QtCore.QObject):
         self._mouse_checkbox = self._switch("点击时显示指向动作")
         layout.addLayout(self._row("桌宠大小", "调整桌宠在屏幕上的显示大小。", self._scale_combo))
         layout.addWidget(self._divider())
-        layout.addLayout(self._row("操作模式", "后台操作直接点击目标窗口；前台操作移动鼠标并同步桌宠动作。", self._input_mode_combo))
+        layout.addLayout(self._row("操作模式", "后台操作不占用鼠标；平滑后台等桌宠到位后点击；前台操作移动鼠标并同步桌宠动作。", self._input_mode_combo))
         layout.addWidget(self._divider())
         layout.addLayout(self._row("桌宠主题", "选择之之的外观与动作。", self._theme_combo))
         layout.addWidget(self._divider())

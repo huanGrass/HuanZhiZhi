@@ -79,6 +79,16 @@ class RuntimeControlTests(unittest.TestCase):
         self.assertEqual(self.strip.task.width(), 76)
         self.assertTrue(self.strip.controls.isHidden())
 
+    def test_transparency_slider_displays_percent_and_accepts_keyboard_changes(self):
+        slider = self.strip.transparency
+        self.assertIsInstance(slider, QtWidgets.QSlider)
+        self.assertEqual((slider.minimum(), slider.maximum(), slider.value()), (0, 100, 40))
+        self.strip.show()
+        slider.setFocus()
+        QtTest.QTest.keyClick(slider, QtCore.Qt.Key.Key_Right)
+        self.assertEqual(slider.value(), 41)
+        self.assertEqual(self.strip.transparency_value.text(), '41%')
+
     def test_pause_keeps_parameters_and_stop_available_and_blocks_repeat_requests(self):
         popup = self.open_controls([CHOICE])
         requested = []

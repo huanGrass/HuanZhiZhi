@@ -484,7 +484,7 @@ class ChatWindowTests(unittest.TestCase):
             return value['message']
         def develop(worker):
             calls.append(('development', worker.thread_id))
-            worker.thread_id = 'development-thread'
+            worker.thread_id = 'intake-thread'
             return '正在按确认的方案实现。'
         with patch('huanzhizhi.skill_creation.run_prompt', side_effect=investigate), \
                 patch('huanzhizhi.skill_creation.develop', side_effect=develop):
@@ -492,15 +492,15 @@ class ChatWindowTests(unittest.TestCase):
                 self.window.conversation.input.setPlainText(message)
                 self.window.conversation.send_button.click()
                 self.wait_for_observation()
-        self.assertEqual(calls, [('intake', None), ('intake', 'intake-thread'), ('development', None)])
+        self.assertEqual(calls, [('intake', None), ('intake', 'intake-thread'), ('development', 'intake-thread')])
         entries = self.window.conversation.entries
         self.assertEqual([e['text'] for e in entries if e['role'] == 'user'], [REQUEST, CONFIRMATION])
         self.assertTrue(any('是否采用' in e['text'] for e in entries))
         self.assertEqual(entries[-1]['text'], '正在按确认的方案实现。')
         self.assertTrue(self.window.conversation.isVisible())
-        self.assertEqual(self.window._creation_thread_id, 'development-thread')
+        self.assertEqual(self.window._creation_thread_id, 'intake-thread')
 
-    def test_failed_handoff_launch_keeps_draft_without_thread_id(self):
+    def test_failed_handoff_launch_keeps_draft_and_intake_thread_for_retry(self):
         import json
         from tests.test_skill_intake import report
         self.window.expand()
@@ -514,8 +514,21 @@ class ChatWindowTests(unittest.TestCase):
             self.window.conversation.input.setPlainText('新增一个桌宠投篮玩法')
             self.window.conversation.send_button.click()
             self.wait_for_observation()
-        self.assertIsNone(self.window._creation_thread_id)
+        self.assertEqual(self.window._creation_thread_id, 'intake-thread')
         self.assertTrue((self.window._creation_directory / 'creation_flow.json').is_file())
+        directory = self.window._creation_directory
+        calls = []
+        def develop(worker):
+            calls.append((worker.directory, worker.thread_id))
+            return '继续开发。'
+        with patch('huanzhizhi.skill_creation.run_prompt') as intake, \
+                patch('huanzhizhi.skill_creation.develop', side_effect=develop):
+            self.window.conversation.input.setPlainText('重试')
+            self.window.conversation.send_button.click()
+            self.wait_for_observation()
+        intake.assert_not_called()
+        self.assertEqual(calls, [(directory, 'intake-thread')])
+        self.assertEqual(self.window.conversation.entries[-1]['text'], '继续开发。')
 
     @patch('huanzhizhi.skill_creation.CreationWorker._prepare_creation', return_value=True)
     def test_creation_followup_reuses_codex_thread_and_directory(self, _intake):

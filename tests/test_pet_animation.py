@@ -87,7 +87,7 @@ class PetAnimationTests(unittest.TestCase):
         self.assertEqual(ordering[release_index-1][0], "paint")
 
     def test_runtime_transparency_survives_actions_cancel_theme_and_feedback(self):
-        for transparent, opacity in ((True, .6), (False, 1.)):
+        for transparent, opacity in ((0, 1.), (40, .6), (73, .27), (100, 0.)):
             with self.subTest(transparent=transparent):
                 self.actor.set_runtime_transparency(True, transparent)
                 self.assertAlmostEqual(self.window.windowOpacity(), opacity, delta=.01)
@@ -103,20 +103,43 @@ class PetAnimationTests(unittest.TestCase):
                 self.assertAlmostEqual(self.window.windowOpacity(), opacity, delta=.01)
                 self.actor.show_feedback(QtCore.QPoint(450, 350), hold=True)
                 self.assertAlmostEqual(self.window.windowOpacity(), opacity, delta=.01)
-        self.actor.set_runtime_transparency(True, True)
-        self.actor.set_runtime_transparency(False, True)
+        self.actor.set_runtime_transparency(True, 40)
+        self.actor.set_runtime_transparency(False, 40)
         self.assertAlmostEqual(self.window.windowOpacity(), 1., delta=.01)
 
     def test_runtime_transparency_can_switch_during_an_action(self):
-        self.actor.set_runtime_transparency(True, True)
+        self.actor.set_runtime_transparency(True, 40)
         self.start()
         self.advance(.2)
-        self.actor.set_runtime_transparency(True, False)
+        self.actor.set_runtime_transparency(True, 0)
         self.assertAlmostEqual(self.window.windowOpacity(), 1., delta=.01)
         self.assertTrue(self.actor.busy)
-        self.actor.set_runtime_transparency(True, True)
+        self.actor.set_runtime_transparency(True, 40)
         self.assertAlmostEqual(self.window.windowOpacity(), .6, delta=.01)
         self.assertTrue(self.actor.busy)
+
+    def test_smooth_feedback_keeps_position_when_started_and_retargeted(self):
+        for theme in ('ufo', 'broom'):
+            with self.subTest(theme=theme):
+                self.actor.set_theme(theme)
+                start = QtCore.QPointF(self.actor._pivot)
+                target = QtCore.QPoint(600, 400)
+                self.actor.show_feedback(target, smooth=True)
+                self.assertLess((self.actor._pivot-start).manhattanLength(), 2)
+                self.assertFalse(self.actor.busy)
+                self.advance(.2)
+                self.assertGreater((self.actor._pivot-start).manhattanLength(), 10)
+                self.assertNotEqual(self.actor.fingertip, QtCore.QPointF(target))
+                current = QtCore.QPointF(self.actor._pivot)
+                target = QtCore.QPoint(380, 320)
+                self.actor.show_feedback(target, smooth=True)
+                self.assertLess((self.actor._pivot-current).manhattanLength(), 2)
+                self.advance(.501)
+                self.assertEqual(self.actor.fingertip, QtCore.QPointF(target))
+                self.actor.cancel()
+                self.advance(2)
+                self.assertEqual(self.window.pos(), self.home)
+                self.assertFalse(self.actor.visual_active)
 
     def test_drag_holds_contact_pose_and_releases_at_exact_end(self):
         self.start("drag", QtCore.QPoint(420, 330), QtCore.QPoint(650, 410), duration=.3)
@@ -263,6 +286,7 @@ class PetAnimationTests(unittest.TestCase):
             self.actor.set_theme(theme)
             self.assertEqual(self.window.pos(), user_home)
             self.actor.show_feedback(QtCore.QPoint(530, 390))
+            self.advance(.151)
             self.advance(9)
             self.assertEqual(self.actor.current_frame, 0)
             self.assertEqual(self.window.pos(), user_home)
@@ -283,10 +307,10 @@ class PetAnimationTests(unittest.TestCase):
             self.assertEqual(self.actor.current_frame, 0)
             self.assertEqual(self.window.pos(), user_home)
 
-    def test_hint_uses_guide_pose_without_input_and_hiding_stops_timer(self):
+    def test_hint_uses_action_pose_without_input_and_hiding_stops_timer(self):
         self.actor.show_hint([QtCore.QPoint(420, 300)])
         self.advance(.5)
-        self.assertEqual(self.actor.current_frame, 14)
+        self.assertEqual(self.actor.current_frame, 12)
         self.assertEqual(self.actor.fingertip, QtCore.QPointF(420, 300))
         self.assertFalse(self.actor.busy)
         self.actor.set_visible(False)
@@ -300,7 +324,7 @@ class PetAnimationTests(unittest.TestCase):
         for _ in range(35):
             self.actor.show_hint(points)
             self.advance(.1)
-            if self.actor.current_frame == 14:
+            if self.actor.current_frame == 12:
                 visited.add(self.actor.fingertip.toPoint().toTuple())
         self.assertEqual(visited, {point.toTuple() for point in points})
         self.assertFalse(self.actor.busy)
@@ -310,8 +334,8 @@ class PetAnimationTests(unittest.TestCase):
         self.advance(10.)
         self.assertEqual(self.window.pos(), self.home)
         self.actor.show_hint(points)
-        self.advance(.5)
-        self.assertEqual(self.actor.current_frame, 14)
+        self.advance(.501)
+        self.assertEqual(self.actor.current_frame, 12)
         self.assertEqual(self.actor.fingertip, QtCore.QPointF(points[0]))
 
     def test_delayed_tick_does_not_compress_press_release_holds(self):
@@ -443,7 +467,8 @@ class PetAnimationTests(unittest.TestCase):
                 self.place_home(area.left()+area.width()*home_fraction)
                 target = QtCore.QPoint(round(area.left()+area.width()*target_fraction), area.center().y())
                 self.actor.show_feedback(target)
-                self.advance(8.67)
+                self.advance(.151)
+                self.advance(8.52)
                 self.assertEqual(self.actor.current_frame, 22)
                 image = self.window._pixmap.toImage().convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
                 pixels = bytes(image.constBits())
@@ -536,28 +561,47 @@ class PetAnimationTests(unittest.TestCase):
         self.assertEqual([event[1] for event in self.events if event[0] == 'press'],
                          [QtCore.QPointF(570, 390), QtCore.QPointF(390, 280)])
 
-    def test_hint_click_matches_original_cycle_and_repeated_refresh(self):
-        points = [QtCore.QPoint(420, 300), QtCore.QPoint(560, 350)]
-        self.actor.show_hint(points)
-        for elapsed, expected in ((.5, 0), (1.81, 0), (1.83, 1), (2.59, 1), (2.61, 0)):
-            self.advance(elapsed-self.clock.now)
-            self.actor.show_hint(points)
-            self.assertEqual(self.actor.current_frame, 14)
-            self.assertEqual(self.actor.fingertip, QtCore.QPointF(points[expected]))
-        self.assertAlmostEqual(self.window.windowOpacity(), .6, delta=.01)
-        self.assertFalse(self.events)
+    def test_hint_and_input_render_identical_poses_and_path_through_release(self):
+        target, end = QtCore.QPoint(420, 300), QtCore.QPoint(560, 350)
+        for theme in ('ufo', 'broom'):
+            for kind in ('click', 'right_click', 'double_click', 'drag'):
+                with self.subTest(theme=theme, kind=kind):
+                    self.clock.now = 0
+                    self.actor.set_theme(theme)
+                    self.events.clear()
+                    self.results.clear()
+                    self.start(kind, target, end if kind == 'drag' else None, duration=.7)
+                    expected = []
+                    while not self.results:
+                        self.advance(.01)
+                        expected.append((self.actor.current_frame, self.actor.fingertip.toTuple(), self.actor.mirrored))
+                    self.assertTrue(any(e[0] == 'press' for e in self.events))
+                    self.clock.now = 0
+                    self.actor.set_theme(theme)
+                    self.events.clear()
+                    self.results.clear()
+                    self.actor.show_hint([target, end] if kind == 'drag' else [target], kind, duration=.7)
+                    actual = []
+                    for _ in expected:
+                        self.advance(.01)
+                        # Frequent confirmations must not reset the shared animation.
+                        self.actor.show_hint([target, end] if kind == 'drag' else [target], kind, duration=.7)
+                        actual.append((self.actor.current_frame, self.actor.fingertip.toTuple(), self.actor.mirrored))
+                    self.assertEqual(actual, expected)
+                    self.assertFalse(self.events)
+                    self.assertFalse(self.results)
 
-    def test_hint_drag_uses_only_first_two_points_and_original_smoothstep(self):
+    def test_legacy_drag_marker_does_not_add_a_third_input_action(self):
         points = [QtCore.QPoint(380, 300), QtCore.QPoint(580, 300), QtCore.QPoint(580, 430)]
         self.actor.show_hint(points, 'drag')
-        for elapsed in (.5, .8, 1.69, 2.3, 2.61, 2.9):
-            self.advance(elapsed-self.clock.now)
-            phase = (elapsed % 2.6)/2.6
-            progress = min(1, max(0, (phase-.15)/.5))
-            progress = progress*progress*(3-2*progress)
-            expected = QtCore.QPointF(380+200*progress, 300)
-            self.assertEqual(self.actor.current_frame, 14)
-            self.assertLessEqual((self.actor.fingertip-expected).manhattanLength(), 1)
+        visited = set()
+        for _ in range(400):
+            self.advance(.01)
+            if self.actor.current_frame in (11, 12):
+                visited.add(self.actor.fingertip.toPoint().toTuple())
+        self.assertIn(points[0].toTuple(), visited)
+        self.assertIn(points[1].toTuple(), visited)
+        self.assertNotIn(points[2].toTuple(), visited)
         self.assertFalse(self.events)
 
     def test_hint_kind_change_restarts_but_same_content_does_not(self):
@@ -587,19 +631,20 @@ class PetAnimationTests(unittest.TestCase):
         self.assertAlmostEqual(self.window.windowOpacity(), 1, delta=.01)
         self.assertEqual(self.window.pos(), self.home)
 
-    def test_hint_clock_sync_updates_phase_without_restarting_approach(self):
+    def test_hint_change_starts_from_current_position_without_stale_action(self):
         points = [QtCore.QPoint(420, 300), QtCore.QPoint(560, 350)]
-        self.actor.show_hint(points, elapsed_ms=0)
-        self.advance(.5)
+        self.actor.show_hint(points)
+        self.advance(.2)
         generation = self.actor._generation
-        self.actor.show_hint(points, elapsed_ms=1900)
+        self.actor.show_hint(points)
         self.assertEqual(self.actor._generation, generation)
-        self.assertEqual(self.actor.current_frame, 14)
+        previous = QtCore.QPointF(self.actor._pivot)
+        self.actor.show_hint([points[1]])
+        self.assertGreater(self.actor._generation, generation)
+        self.assertLessEqual((self.actor._segments[0].start-previous).manhattanLength(), 1)
+        self.advance(.501)
         self.assertEqual(self.actor.fingertip, QtCore.QPointF(points[1]))
-        self.actor.show_hint(points, elapsed_ms=0)
-        self.assertEqual(self.actor._generation, generation)
-        self.assertEqual(self.actor.current_frame, 14)
-        self.assertEqual(self.actor.fingertip, QtCore.QPointF(points[0]))
+        self.assertFalse(self.events)
 
     def test_hint_validation_keeps_invalid_paths_out_of_animation(self):
         for kind, points in (('drag', [QtCore.QPoint(420, 300)]),
@@ -608,7 +653,7 @@ class PetAnimationTests(unittest.TestCase):
                 self.actor.show_hint(points, kind)
         for value in (-1, float('inf'), float('nan'), True):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                self.actor.show_hint([QtCore.QPoint(420, 300)], elapsed_ms=value)
+                self.actor.show_hint([QtCore.QPoint(420, 300)], duration=value)
 
     def test_line_hint_keeps_actor_at_home_and_cancel_restores_hint_opacity(self):
         self.actor.show_hint([QtCore.QPoint(420, 300), QtCore.QPoint(560, 350)], 'line')
@@ -649,25 +694,20 @@ class PetAnimationTests(unittest.TestCase):
             self.advance(.02)
         self.assertAlmostEqual(self.window.windowOpacity(), 1, delta=.01)
 
-    def test_hint_clock_sync_keeps_exact_cycle_boundary_on_first_point(self):
-        points = [QtCore.QPoint(350, 300), QtCore.QPoint(530, 340), QtCore.QPoint(530, 430)]
-        for theme in ('ufo', 'broom'):
-            for kind in ('click', 'drag'):
-                with self.subTest(theme=theme, kind=kind):
-                    self.actor.set_theme(theme)
-                    self.clock.now = 5.83 if theme == 'ufo' else 5.81
-                    self.actor.show_hint(points[:2] if kind == 'click' else points, kind, elapsed_ms=0)
-                    self.advance(.5)
-                    self.clock.now = 8.43 if theme == 'ufo' else 8.41
-                    self.actor.show_hint(points[:2] if kind == 'click' else points, kind, elapsed_ms=2599.999)
-                    self.assertEqual(self.actor.fingertip, QtCore.QPointF(points[1]))
-                    self.actor.show_hint(points[:2] if kind == 'click' else points, kind, elapsed_ms=2600)
-                    self.assertEqual(self.actor.fingertip, QtCore.QPointF(points[0]))
+    def test_delayed_hint_tick_preserves_action_contact_and_release(self):
+        self.actor.show_hint([QtCore.QPoint(350, 300)], 'double_click')
+        self.advance(5)
+        self.assertEqual(self.actor.current_frame, 12)
+        self.advance(.151)
+        self.assertEqual(self.actor.current_frame, 11)
+        self.advance(.081)
+        self.assertEqual(self.actor.current_frame, 12)
+        self.assertFalse(self.events)
 
     def test_approach_keeps_moving_through_pose_changes_without_position_jumps(self):
         target = QtCore.QPoint(540, 360)
         for theme in ('ufo', 'broom'):
-            for mode, duration in (('click', .5), ('hint', .45)):
+            for mode, duration in (('click', .5), ('hint', .5)):
                 with self.subTest(theme=theme, mode=mode):
                     self.clock.now = 0
                     self.actor.set_theme(theme)

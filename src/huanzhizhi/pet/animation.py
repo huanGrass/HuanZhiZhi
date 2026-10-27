@@ -17,7 +17,6 @@ import time
 from PySide6 import QtCore, QtGui
 
 from huanzhizhi.pet.constants import DEFAULT_DISPLAY_SCALE, MIN_DISPLAY_SCALE, ULTRA_DISPLAY_MAX_SCALE
-from huanzhizhi.pet.point_overlay import hint_phase_and_anchor
 from huanzhizhi.pet.window import PetWindow
 
 
@@ -76,8 +75,8 @@ class PetAnimationController(QtCore.QObject):
         self._held_feedback = False
         self._hint_points: tuple[QtCore.QPointF, ...] = ()
         self._hint_kind = "click"
-        self._hint_started = self._started
-        self._hint_mirrored = False
+        self._hint_index = 0
+        self._hint_duration = .5
         self._closed = False
         self._paused = False
         self._controlled = False
@@ -124,28 +123,34 @@ class PetAnimationController(QtCore.QObject):
 
     @property
     def home_anchor_geometry(self) -> QtCore.QRect:
-        """Keep runtime controls at the visible resting pose during travel."""
-        _, mask, _, _ = self._prepared(0, self._home_mirrored)
-        return mask.boundingRect().translated(self._home)
+        """Keep runtime controls centered on the resting body during travel."""
+        _, mask, anchor, _ = self._prepared(0, self._home_mirrored)
+        rect = mask.boundingRect().translated(self._home)
+        rect.moveCenter(QtCore.QPoint(round(self._home.x()+anchor.x()), rect.center().y()))
+        return rect
 
     @property
     def anchored_geometry(self) -> QtCore.QRect:
-        """Keep attached UI on one reference pose while the artwork changes."""
+        """Center attached UI on the body anchor, with stable resting bounds."""
         _, mask, anchor, _ = self._prepared(0, False)
         pivot = (QtCore.QPointF(self.window.pos()) + self._prepared(self._frame, self._mirrored)[2]
                  if self._paused else self._pivot)
-        return mask.boundingRect().translated((pivot-anchor).toPoint())
+        rect = mask.boundingRect().translated((pivot-anchor).toPoint())
+        rect.moveCenter(QtCore.QPoint(round(pivot.x()), rect.center().y()))
+        return rect
 
     @property
     def task_menu_geometry(self) -> QtCore.QRect:
-        rect = self.anchored_geometry
+        pivot = (QtCore.QPointF(self.window.pos()) + self._prepared(self._frame, self._mirrored)[2]
+                 if self._paused else self._pivot)
         if self._theme != "broom":
-            return rect
+            # Keep both columns outside the resting silhouette for this facing.
+            _, mask, anchor, _ = self._prepared(0, self._mirrored)
+            return mask.boundingRect().translated((pivot-anchor).toPoint())
+        rect = self.anchored_geometry
         # Narrow the horizontal anchor to the character, keeping the full
         # pose's vertical center. Task bubbles may cover part of the broom.
         scale = self._scale / .32
-        pivot = (QtCore.QPointF(self.window.pos()) + self._prepared(self._frame, self._mirrored)[2]
-                 if self._paused else self._pivot)
         return QtCore.QRect(round(pivot.x()-55*scale), rect.top(),
                             round(110*scale), rect.height())
 
@@ -186,8 +191,10 @@ class PetAnimationController(QtCore.QObject):
         self._update_home_mirror()
         self._render(0, self._home_pivot(), self._home_mirrored)
 
-    def set_runtime_transparency(self, active: bool, transparent: bool) -> None:
-        self._runtime_opacity = (.6 if transparent else 1.) if active else None
+    def set_runtime_transparency(self, active: bool, transparency: int) -> None:
+        if type(transparency) is not int or not 0 <= transparency <= 100:
+            raise ValueError("桌宠透明度必须是 0 到 100 的整数")
+        self._runtime_opacity = 1. - transparency / 100 if active else None
         self._set_opacity(1.)
 
     def _set_opacity(self, opacity: float) -> None:
@@ -272,8 +279,15 @@ class PetAnimationController(QtCore.QObject):
         self._sync_pivot()
         self._on_step, self._on_done = on_step, on_done
         self._set_opacity(.6)
+        segments = self._action_segments(kind, target, destination, duration)
+        last = segments[-1]
+        segments.extend(self._return_segments(last.end, last.mirrored, wait=8.))
+        self._begin(segments)
+
+    def _action_segments(self, kind, target, destination, duration, *, approach=True) -> list[_Segment]:
+        """The same movement and contact poses for input and visual-only actions."""
         mirror = self._choose_mirror((target,) if destination is None else (target, destination), 12)
-        segments = self._approach(target, mirror, max(.12, duration))
+        segments = self._approach(target, mirror, max(.12, duration)) if approach else []
         contact_pivot = self._contact_pivot(12, target, mirror)
         if kind == "move":
             segments.append(_Segment(.001, 11, contact_pivot, contact_pivot, mirror, final=True))
@@ -284,7 +298,6 @@ class PetAnimationController(QtCore.QObject):
                 _Segment(duration, 12, contact_pivot, end_pivot, mirror, "drag", straight=True),
                 _Segment(.12, 11, end_pivot, end_pivot, mirror, "release", destination, True),
             ])
-            contact_pivot = end_pivot
         else:
             for index in range(2 if kind == "double_click" else 1):
                 segments.extend([
@@ -292,21 +305,26 @@ class PetAnimationController(QtCore.QObject):
                     _Segment(.08, 11, contact_pivot, contact_pivot, mirror, "release", target,
                              final=kind != "double_click" or index == 1),
                 ])
-        segments.extend(self._return_segments(contact_pivot, mirror, wait=8.))
-        self._begin(segments)
+        return segments
 
-    def show_feedback(self, point: QtCore.QPoint | QtCore.QPointF, hold: bool = False) -> None:
-        """Immediate background/manual feedback; never emits input callbacks."""
+    def show_feedback(self, point: QtCore.QPoint | QtCore.QPointF, hold: bool = False, *, smooth: bool = False) -> None:
+        """Background/manual feedback; never emits input callbacks."""
         target = self._point(point)
         self.cancel(return_home=False)
-        mirror = self._choose_mirror((target,), 12)
-        pivot = self._contact_pivot(12, target, mirror)
+        self._sync_pivot()
         self._held_feedback = bool(hold)
         self._set_opacity(.6)
         self._set_visual_active(True)
-        self._render(12, pivot, mirror)
         if not hold:
-            self._begin([_Segment(.12, 12, pivot, pivot, mirror), *self._return_segments(pivot, mirror, wait=8.)])
+            # Immediate background feedback skips travel, but shares the same
+            # contact/release poses; smooth feedback also shares the approach.
+            segments = self._action_segments('click', target, None, .5, approach=smooth)
+            last = segments[-1]
+            self._begin([*segments, *self._return_segments(last.end, last.mirrored, wait=8.)])
+            return
+        mirror = self._choose_mirror((target,), 12)
+        pivot = self._contact_pivot(12, target, mirror)
+        self._render(12, pivot, mirror)
 
     def move_feedback(self, point: QtCore.QPoint | QtCore.QPointF) -> None:
         target = self._point(point)
@@ -323,34 +341,28 @@ class PetAnimationController(QtCore.QObject):
 
     def show_hint(
         self, points: Sequence[QtCore.QPoint | QtCore.QPointF], kind: str = "click", *,
-        elapsed_ms: float | None = None,
+        duration: float = .5,
     ) -> None:
-        if kind not in {"click", "drag", "line"} or not 1 <= len(points) <= 4:
-            raise ValueError("提示必须包含 1 到 4 个点，类型为 click、drag 或 line")
+        if kind not in {"click", "right_click", "double_click", "drag", "line"} or not 1 <= len(points) <= 4:
+            raise ValueError("提示必须包含 1 到 4 个点，类型为点击、拖动或辅助线")
         if (kind == "drag" and len(points) < 2) or (kind == "line" and len(points) != 2):
             raise ValueError("拖动提示至少需要起终点，直线提示必须包含两个点")
         targets = tuple(self._point(point) for point in points)
-        if elapsed_ms is not None and (isinstance(elapsed_ms, bool) or not isinstance(elapsed_ms, (int, float))
-                                       or not math.isfinite(elapsed_ms) or elapsed_ms < 0):
-            raise ValueError("提示时钟必须是非负有限毫秒数")
+        if type(duration) not in (int, float) or not math.isfinite(duration) or not .01 <= duration <= 60:
+            raise ValueError("动作时长必须在 0.01 到 60 秒之间")
         if kind == "line":
             self.clear_hint()
             return
         # Tasks refresh an unchanged hint while verifying the board. Keep
         # the current approach/pointing sequence instead of restarting it.
-        if targets == self._hint_points and kind == self._hint_kind:
-            if elapsed_ms is not None:
-                self._hint_started = self._clock()-elapsed_ms/1000
-                if not self._segments:
-                    self._advance_hint(self._clock())
+        if targets == self._hint_points and kind == self._hint_kind and duration == self._hint_duration:
             return
         self.cancel(return_home=False)
         self._sync_pivot()
         self._hint_points, self._hint_kind = targets, kind
-        self._hint_started = self._clock()-(0. if elapsed_ms is None else elapsed_ms/1000)
-        self._hint_mirrored = self._choose_mirror(targets[:2], 14)
+        self._hint_index, self._hint_duration = 0, duration
         self._set_opacity(.6)
-        self._begin(self._approach(targets[0], self._hint_mirrored, .45, guide=True))
+        self._advance_hint()
 
     def clear_hint(self) -> None:
         if self._hint_points:
@@ -425,7 +437,7 @@ class PetAnimationController(QtCore.QObject):
             if self._held_feedback:
                 return
             if self._hint_points:
-                self._advance_hint(now)
+                self._advance_hint()
                 return
             self._advance_idle(now)
             return
@@ -472,7 +484,7 @@ class PetAnimationController(QtCore.QObject):
         self._segments = []
         self._state_started = now
         if self._hint_points:
-            self._advance_hint(now)
+            self._advance_hint()
         else:
             self._timer.setInterval(80)
             self._set_visual_active(False)
@@ -518,8 +530,8 @@ class PetAnimationController(QtCore.QObject):
                 self._timer.start(16 if self._visual_active else 80)
         return super().eventFilter(watched, event)
 
-    def _approach(self, target: QtCore.QPointF, mirrored: bool, duration: float, *, guide: bool = False) -> list[_Segment]:
-        end = self._contact_pivot(14 if guide else 12, target, mirrored)
+    def _approach(self, target: QtCore.QPointF, mirrored: bool, duration: float) -> list[_Segment]:
+        end = self._contact_pivot(12, target, mirrored)
         start = QtCore.QPointF(self._pivot)
         travel_mirror = mirrored
         if abs(end.x()-start.x()) > 1:
@@ -529,7 +541,7 @@ class PetAnimationController(QtCore.QObject):
         for a, b, frame in ((0., .55, 7), (.55, .76, 9), (.76, .9, 10), (.9, 1., 11)):
             facing = travel_mirror if frame in (7, 9) else mirrored
             segments.append(_Segment(duration*(b-a), frame, start, end, facing,
-                                     "" if guide else "move", progress_range=(a, b)))
+                                     "move", progress_range=(a, b)))
         return segments
 
     def _return_segments(self, position: QtCore.QPointF, mirrored: bool, *, wait: float = 0.,
@@ -565,14 +577,16 @@ class PetAnimationController(QtCore.QObject):
         segments.append(_Segment(.001, 0, home, home, self._home_mirrored))
         return segments
 
-    def _advance_hint(self, now: float) -> None:
-        # Subtracting clock values can put an exact 2600 ms boundary just
-        # below the next cycle. Discard sub-microsecond floating-point noise.
-        elapsed_ms = round(max(0., now-self._hint_started)*1000, 3)
-        _, target = hint_phase_and_anchor(self._hint_points, self._hint_kind,
-                                          elapsed_ms)
-        self._timer.setInterval(16)
-        self._render(14, self._contact_pivot(14, target, self._hint_mirrored), self._hint_mirrored)
+    def _advance_hint(self) -> None:
+        target = self._hint_points[self._hint_index]
+        destination = self._hint_points[1] if self._hint_kind == 'drag' else None
+        segments = self._action_segments(self._hint_kind, target, destination, self._hint_duration)
+        last = segments[-1]
+        # No input callbacks are installed. Hold briefly, then demonstrate the
+        # next point while fresh observations keep the existing hint alive.
+        segments.append(_Segment(.6, last.frame, last.end, last.end, last.mirrored))
+        self._hint_index = 0 if destination is not None else (self._hint_index+1) % len(self._hint_points)
+        self._begin(segments)
 
     def _advance_idle(self, now: float) -> None:
         interval = 80
@@ -638,21 +652,27 @@ class PetAnimationController(QtCore.QObject):
         pixmap, mask, anchor, _ = self._prepared(frame, mirrored)
         position = (pivot-anchor).toPoint()
         key = (self._theme, frame, mirrored, self._scale, position.x(), position.y(), pixmap.cacheKey())
+        direction_changed = mirrored != self._mirrored
         self._frame, self._mirrored, self._pivot = frame, mirrored, QtCore.QPointF(pivot)
         if key == self._last_render:
             return
         self._last_render = key
         self.window.set_frame(pixmap, mask)
-        if self.window.pos() != position:
+        moved = self.window.pos() != position
+        if moved:
             self.window.move(position)
+        if moved or direction_changed:
             self.position_changed.emit(QtCore.QPoint(position))
 
     def _prepared(self, index: int, mirrored: bool) -> tuple[QtGui.QPixmap, QtGui.QRegion, QtCore.QPointF, QtCore.QPointF]:
         ratio = max(1., self.window.devicePixelRatioF())
-        key = (self._theme, index, mirrored, self._scale, ratio)
+        frames = self._metadata[self._theme]["frames"]
+        # Seven-pose themes reuse artwork without changing the action timeline.
+        source_index = index if str(index) in frames else {9: 0, 13: 10, 19: 0, 22: 7}.get(index, index)
+        key = (self._theme, source_index, mirrored, self._scale, ratio)
         if key in self._frames:
             return self._frames[key]
-        frame = self._metadata[self._theme]["frames"][str(index)]
+        frame = frames[str(source_index)]
         source = self._sheet(self._assets / frame["sheet"]).copy(*frame["rect"])
         anchor = frame["anchor"]
         point = frame.get("point", anchor)
@@ -660,9 +680,8 @@ class PetAnimationController(QtCore.QObject):
         unit = (768*self._scale/frame["rect"][3])*frame.get("scale", 1.)*self._metadata[self._theme]["size_factor"]
         if source.isNull():
             raise RuntimeError(f"桌宠动作帧为空：{self._theme}/{index}")
-        # The return artwork faces left in both atlases; the other poses face
-        # right. Normalize it so one facing value also works across transitions.
-        source_mirrored = not mirrored if index == 22 else mirrored
+        # A dedicated return pose faces left; a reused move pose faces right.
+        source_mirrored = not mirrored if source_index == 22 else mirrored
         if source_mirrored:
             source = source.transformed(QtGui.QTransform().scale(-1, 1))
             anchor = [source.width()-anchor[0], anchor[1]]

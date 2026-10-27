@@ -25,11 +25,14 @@ class ForegroundChatStopTests(unittest.TestCase):
 
     def test_stop_emits_synchronous_cancellation_before_worker_interruption(self):
         order = []
+        hints = []
+        self.window.hint_requested.connect(lambda event, path: hints.append((event.kind, path)))
         self.window.foreground_input_stop_requested.connect(
             lambda: order.append(("cancel", self.window._exploration_stopping)))
         self.worker.requestInterruption.side_effect = lambda: order.append(("interrupt",))
         self.window._stop_exploration()
         self.assertEqual(order, [("cancel", True), ("interrupt",)])
+        self.assertEqual(hints, [('clear', self.worker.hint_events)])
         self.worker.wait.assert_not_called()
         self.assertFalse(self.window.conversation.stop_button.isEnabled())
         self.assertEqual(self.window.conversation.entries[-1]["text"], "正在停止……")

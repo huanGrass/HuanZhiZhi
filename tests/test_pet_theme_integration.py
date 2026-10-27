@@ -31,7 +31,7 @@ class PetThemeIntegrationTests(unittest.TestCase):
         self.pet.point_overlay.deleteLater()
         self.app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
 
-    def test_default_is_ufo_and_original_cannot_be_selected(self):
+    def test_selected_theme_is_rendered_and_original_cannot_be_selected(self):
         self.assertEqual(self.pet.theme, "ufo")
         self.assertEqual(self.actor.theme, "ufo")
         self.assertFalse(self.pet.window._pixmap.isNull())
@@ -39,6 +39,10 @@ class PetThemeIntegrationTests(unittest.TestCase):
             self.pet.set_theme("original")
         with self.assertRaises(ValueError):
             self.actor.set_theme("original")
+        with self.assertRaises(ValueError):
+            self.pet.set_theme("deepseek")
+        with self.assertRaises(ValueError):
+            self.actor.set_theme("deepseek")
         self.assertEqual(self.pet.theme, "ufo")
         self.assertEqual(self.actor.theme, "ufo")
 
@@ -55,7 +59,10 @@ class PetThemeIntegrationTests(unittest.TestCase):
         self.assertTrue(self.pet.window.isVisible())
         self.assertTrue(self.actor._timer.isActive())
         self.actor.show_feedback(QtCore.QPoint(600, 450))
-        self.actor.advance(self.actor._clock() + 10)
+        # Press/release minimum holds deliberately survive delayed GUI ticks.
+        start = self.actor._clock()
+        for step in range(1, 601):
+            self.actor.advance(start + step*.02)
         self.assertEqual(self.pet.window.pos(), destination)
 
     def test_scale_during_feedback_uses_home_center(self):
@@ -65,7 +72,9 @@ class PetThemeIntegrationTests(unittest.TestCase):
         self.assertLessEqual((self.pet.window.geometry().center() - home_center).manhattanLength(), 2)
         scaled_home = QtCore.QPoint(self.pet.window.pos())
         self.actor.show_feedback(QtCore.QPoint(550, 400))
-        self.actor.advance(self.actor._clock() + 10)
+        start = self.actor._clock()
+        for step in range(1, 601):
+            self.actor.advance(start + step*.02)
         self.assertEqual(self.pet.window.pos(), scaled_home)
 
     def test_hide_stops_timer_and_show_returns_to_original_home(self):

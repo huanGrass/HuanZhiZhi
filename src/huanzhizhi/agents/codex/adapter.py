@@ -81,7 +81,7 @@ def model_catalog():
 
 
 def build_command(executable, options, thread_id, answer, clicks, *, input_mode='background', observation_image=None):
-    if input_mode not in ('background', 'foreground'):
+    if input_mode not in ('background', 'background_smooth', 'foreground'):
         raise ValueError('未知鼠标操作模式')
     command = [executable, 'exec', '--sandbox', 'read-only' if observation_image else 'danger-full-access',
                '-c', 'model_reasoning_effort=' + json.dumps(options['reasoning_effort']),

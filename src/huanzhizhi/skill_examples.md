@@ -19,6 +19,23 @@ def capture_selected(title, width, height, hwnd):
 
 后续循环使用 `info = api.refresh(info, rule)` 与 `image = api.capture_client(info)`。从当次截图确认目标坐标 `(x, y)` 后，调用 `api.post_click(info, x, y, action='click')`；不要再发送点击动画事件。调用须位于 `TaskSession` 或创建流程提供的点击事件通道内。返回仅表示消息已投递，须用新截图核对实际结果。等待画面变化时使用截止时间和 `session.wait_for_stop(...)`，不要因画面暂未更新而重复点击。
 
+## 自动与提示共用动作
+
+两种模式共用识别结果、动作坐标和下面的调用，仅 `hint` 不同。窗口校验、客户区坐标转换和桌宠动作动画由现有接口处理；提示不发送鼠标输入，不需要业务选择 `line/click` 显示类型或维护动画计时。
+
+```python
+# info、x、y 来自当前已核对的截图，两种模式传同一个目标。
+api.post_click(info, x, y, hint=(mode == 'hint'), label='选择此棋子')
+# 右键、双击仍用 action='right_click' / 'double_click'。
+# 拖动也沿用同一组起终点及动作时长：
+api.post_drag(info, x, y, end_x, end_y, duration=.5,
+              hint=(mode == 'hint'), label='拖动到目标')
+```
+
+业务只根据实际画面判断动作是否仍有效、何时推进。例如象棋的两点动作：未选中时执行或提示起点，确认选中后执行或提示终点，确认真实落子后才推进棋局。提示返回不表示已操作；用户可选其他合法动作，需按实际画面重新判断。自动模式发送一次后等待结果，不能因下一帧没变化而重发。
+
+提示使用原有过期保护，业务每次重新观察确认当前动作后再调用同一接口，宿主会续期而不重启动画。无法确认、暂停或动作失效时沿用 `session.emit_hint([], 'clear', '建议已失效')`；不要另开线程盲目续期。旧的多点标记和 `line` 辅助线接口仍可用，但新动作提示无需调用它们。退出沿用现有清理逻辑，先 clear 再发送唯一的 finished。
+
 ## 通用异常确认
 
 对可能由动画、加载或短暂遮挡引起的观察异常，使用 SDK 的 `confirm_observation`。检测函数每次重新采集状态，并对同一个参考状态做完整校验；不满足且可能自行恢复时抛出 `ObservationPending`，通过时返回实际结果。不要把所有 `Exception` 或 `ValueError` 统一转成可复检异常。
@@ -72,56 +89,23 @@ engine, model, dll_directories, environment = katago_paths(component, root)
 
 ## 集中验证
 
-以下脚本放在草稿的 `verify.py`，填写真实技能 ID、草稿入口和当次参数。用项目解释器以 `-I -X utf8 -m huanzhizhi.script_runner <verify.py绝对路径>` 运行，命令工具使用 `tty=false`。示例只记录事件与耗时；根据用户目标增加实际画面断言，在目标事件确认后调用 `manager.stop()` 验证停止。超时只是终止条件，不能算成功。
+探索时直接调用上述截图与输入接口，保存前后画面及标注；固化为可运行技能后，使用宿主固定入口验证，在本次草稿目录执行：
 
-```python
-from dataclasses import asdict
-import json
-import os
-from pathlib import Path
-import time
-from PySide6 import QtCore
-from huanzhizhi.tasks.process import TaskProcessManager
-
-app = QtCore.QCoreApplication([])
-manager = TaskProcessManager()
-records, errors, states = [], [], []
-started = time.perf_counter()
-timed_out = False
-
-def record(event):
-    records.append({'seconds': time.perf_counter() - started, **asdict(event)})
-    # 在确认本次目标事件后调用 manager.stop()；不能把任意状态当作成功。
-
-def state_changed(state):
-    states.append(state)
-    if state == 'idle':
-        app.quit()
-
-def timeout():
-    global timed_out
-    timed_out = True
-    manager.stop()
-
-timer = QtCore.QTimer()
-timer.setSingleShot(True)
-timer.timeout.connect(timeout)
-manager.event_received.connect(record)
-manager.error.connect(errors.append)
-manager.state_changed.connect(state_changed)
-try:
-    manager.start('技能名称', Path(__file__).with_name('task_draft.py'), {},
-                  input_mode=os.environ.get('HUANZHIZHI_INPUT_MODE', 'background'))
-    timer.start(30000)  # 按任务设置验证时限；options 应使用当次真实参数。
-    app.exec()
-finally:
-    timer.stop()
-    manager.close()
-print(json.dumps({'events': records, 'errors': errors, 'states': states,
-                  'timed_out': timed_out}, ensure_ascii=False))
+```text
+<项目python> -I -X utf8 -m huanzhizhi.skill_trial --source "已有技能目录或本草稿working/技能目录" --until-log "业务结果已确认的完整日志"
 ```
 
-核对实际画面、业务结果、`FinishedEvent.error`、`stopped_by_request`、进程错误与最终 `idle` 状态。连续任务可在同一次短运行里覆盖两轮及停止；新改动影响哪一段就验证哪一段，必要的边界和错误处理仍需覆盖。验证通过后交付，不无依据重复扩展检查。
+先确认来源适用于本次用户目标、窗口及实际状态。验证业务时，`--until-log` 必须对应技能在核对真实业务结果之后通过 `session.emit_log()` 发出的完整消息，不能用启动、初始化、开始分析等消息证明业务成功。没有这样的消息时只在 working 副本的实际成功分支补充正常运行日志，不改成无依据的成功声明。
+
+若已有业务证据仍有效、本次只补验停止回执或资源释放，可用现有的“资源已就绪、进入可停止等待”日志触发停止，沿用同一入口及 `--until-log`，不再重放已通过的业务动作。确认收到无错误且 `stopped_by_request=true` 的 finished、最终 idle，并核对被修改的资源释放；这只能证明收尾，不能代替业务或尚未覆盖模式的验证。用 `--result stop_result.json` 等明确名称保留补验结果，不覆盖此前业务证据。
+
+入口复制已安装技能的可分发文件到本草稿 working，不复制原运行数据；已有副本直接传 working 路径。每个模式默认最长运行 30 秒，`--timeout` 可指定不超过 180 秒的本次运行时限，参数用 `--options` 传 JSON。保持命令工具 `tty=false`。
+
+声明了 `mode` 参数且包含 `hint`、`auto` 的技能，传 `--options '{"mode":"auto"}'` 时入口固定先验提示、再验自动；提示失败不会启动自动。提示阶段拦截宿主鼠标、键盘、文本和滚轮输入，尝试输入即记为失败，捕获异常后继续显示提示也不能通过。按宿主实时显示记录确认同一建议连续可见至少 2 秒，再停止并等待无错误的停止回执、idle 和宿主清除记录；技能自身日志不能代替显示证据。只补验提示时传 `--options '{"mode":"hint"}'`，无需 `--until-log`。自动与普通技能沿用原 TaskProcessManager、本轮输入模式及宿主通道，匹配业务日志后停止并核对收尾。
+
+`first_action.json` 在启动前建立，并随事件实时更新；`status=running` 表示尚未验完，`passed/failed` 才是最终结果。`runs` 保留各模式的耗时、错误与停止回执，`host_hints_path` 指向本轮宿主即时追加的真实显示/消失记录；无需等模型返回或另行交接。详细技能事件放在副本自身 `.runtime/runs/trial_*/events.jsonl`。自动模式匹配消息只是所选业务确认分支的证据，仍须结合实际画面与该分支的核对依据判断结果。超时、正常退出或仅收到 finished 不等于成功。未确认结果时先查看已有错误与画面，不重发输入。
+
+验证取得真实结果后，沿用同一份实现和样本。后续只补验受改动影响的部分和未覆盖要求，影响不明时扩大验证；必要运行完成后结束，不编写断言套件、模拟用例或审计报告。提示通过本轮宿主通道实际展示，使用现有画面与事件核对，不把桌宠窗口枚举、显示计时等验收代码写进技能业务循环。已有实现完全满足目标时直接说明可复用，不重复创建同功能技能。
 
 ## 技能临时控制桌宠
 

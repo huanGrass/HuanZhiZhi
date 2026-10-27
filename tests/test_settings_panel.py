@@ -39,6 +39,43 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
         self.pet.close()
         self.temp.cleanup()
 
+    def test_deepseek_selection_models_and_busy_controls(self) -> None:
+        self.panel.close()
+        settings = SettingsComponent(Path(self.temp.name) / 'settings.ini')
+        self.addCleanup(settings.close)
+        models = [dict(id='deepseek-account/deepseek-flash', name='Flash', efforts=['off', 'high'], image=True),
+                  dict(id='deepseek-account/deepseek-v4-pro', name='Pro', efforts=['off', 'high'], image=False)]
+        with mock.patch('huanzhizhi.agents.deepseek.adapter.model_catalog', return_value=models):
+            self.panel = DesktopPetSettingsComponent(self.pet, self.log_path, settings=settings)
+            self.panel.show_ai_settings()
+            combo = self.panel._agent_combo
+            combo.setCurrentIndex(combo.findData('deepseek'))
+            guide = self.panel._deepseek_guide
+            for _ in range(100):
+                self.app.processEvents()
+                if guide.worker is None and guide._models:
+                    break
+                QtTest.QTest.qWait(10)
+            self.assertEqual(guide._models, models)
+            self.assertEqual(settings.get_agent_tool(), 'deepseek')
+            self.assertTrue(guide.isVisible())
+            self.assertFalse(self.panel._codex_fields.isVisible())
+            self.assertIn('不支持图片', guide.model_combo.itemText(1))
+            guide.model_combo.setCurrentIndex(1)
+            guide.model_combo.activated.emit(1)
+            self.assertEqual(settings.get_deepseek_options()['model'], 'deepseek-account/deepseek-v4-pro')
+            settings.ai_work_active = lambda: True
+            self.panel.refresh_ai_availability()
+            self.assertFalse(guide.model_combo.isEnabled())
+            self.assertFalse(guide.reasoning_combo.isEnabled())
+            self.assertFalse(combo.isEnabled())
+            settings.ai_work_active = lambda: False
+            self.panel.refresh_ai_availability()
+            self.assertTrue(guide.model_combo.isEnabled())
+            combo.setCurrentIndex(combo.findData('codex'))
+            self.assertFalse(guide.isVisible())
+            self.assertTrue(self.panel._codex_fields.isVisible())
+
     def test_closed_panel_has_no_event_filters_during_cycle_collection(self) -> None:
         original_filter = DesktopPetSettingsComponent.eventFilter
         closed_ids = set()
@@ -163,6 +200,7 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
         self.assertTrue(self.panel._theme_combo.isEnabled())
         self.assertEqual(self.panel._theme_combo.count(), 2)
         self.assertEqual(self.panel._theme_combo.findData("original"), -1)
+        self.assertEqual(self.panel._theme_combo.findData("deepseek"), -1)
         self.pet.set_theme("broom")
         self.panel._theme_combo.setCurrentIndex(self.panel._theme_combo.findData("ufo"))
         self.assertEqual(self.pet.theme, "ufo")
@@ -177,12 +215,13 @@ class DesktopPetSettingsPanelTests(unittest.TestCase):
         self.panel = DesktopPetSettingsComponent(self.pet, self.log_path, settings=settings)
         try:
             self.assertEqual(self.panel._input_mode_combo.currentData(), "foreground")
-            self.panel._input_mode_combo.setCurrentIndex(self.panel._input_mode_combo.findData("background"))
-            reopened = SettingsComponent(path)
-            try:
-                self.assertEqual(reopened.get_input_mode(), "background")
-            finally:
-                reopened.close()
+            for mode in ("background_smooth", "background", "foreground"):
+                self.panel._input_mode_combo.setCurrentIndex(self.panel._input_mode_combo.findData(mode))
+                reopened = SettingsComponent(path)
+                try:
+                    self.assertEqual(reopened.get_input_mode(), mode)
+                finally:
+                    reopened.close()
         finally:
             self.panel.close()
             settings.close()

@@ -77,10 +77,16 @@ class InputCancelEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class InputBlockedEvent:
+    type: str = field(default="input_blocked", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class HintEvent:
     kind: str
     points: tuple[tuple[int, int], ...]
     label: str
+    duration: float = .5
     type: str = field(default="hint", init=False)
 
 
@@ -126,7 +132,7 @@ class PetReleaseEvent:
     type: str = field(default='pet_release', init=False)
 
 
-TaskEvent: TypeAlias = StatusEvent | LogEvent | ParametersAppliedEvent | PauseStateEvent | SpeakEvent | PointEvent | InputRequestEvent | InputCancelEvent | HintEvent | PreviewEvent | FinishedEvent | PetAcquireEvent | PetUpdateEvent | PetReleaseEvent
+TaskEvent: TypeAlias = StatusEvent | LogEvent | ParametersAppliedEvent | PauseStateEvent | SpeakEvent | PointEvent | InputRequestEvent | InputCancelEvent | InputBlockedEvent | HintEvent | PreviewEvent | FinishedEvent | PetAcquireEvent | PetUpdateEvent | PetReleaseEvent
 
 
 def validate_pet_state(x, y, facing, pose) -> None:
@@ -262,6 +268,9 @@ def parse_event_line(line: bytes | str) -> TaskEvent:
         raise ProtocolError("任务事件必须是单个 JSON 对象")
     _require_protocol_header(payload)
     event_type = payload["type"]
+    if event_type == 'input_blocked':
+        _require_exact_fields(payload, {'protocol_version', 'type'})
+        return InputBlockedEvent()
     if event_type in {'pet_acquire', 'pet_release', 'pet_update'}:
         fields = {'protocol_version', 'type', 'lease'}
         if event_type == 'pet_update':
@@ -309,19 +318,25 @@ def parse_event_line(line: bytes | str) -> TaskEvent:
         _require_exact_fields(payload, {'protocol_version', 'type', 'request_id'})
         return InputCancelEvent(_input_request_id(payload['request_id']))
     if event_type == "hint":
-        _require_exact_fields(payload, {"protocol_version", "type", "kind", "points", "label"})
+        fields = {"protocol_version", "type", "kind", "points", "label"}
+        _require_exact_fields(payload, fields | ({'duration'} if 'duration' in payload else set()))
         kind, points = payload["kind"], payload["points"]
-        expected = {"clear": {0}, "click": {1, 2}, "drag": {3}, "line": {2}}
+        expected = {"clear": {0}, "click": {1, 2}, "right_click": {1}, "double_click": {1},
+                    "drag": {2, 3}, "line": {2}}
         if not isinstance(kind, str) or kind not in expected or not isinstance(points, list) or len(points) not in expected[kind]:
             raise ProtocolError("hint 的类型或坐标数量无效")
         for point in points:
             if not isinstance(point, list) or len(point) != 2 or any(isinstance(v, bool) or not isinstance(v, int) for v in point):
                 raise ProtocolError("hint 坐标必须是两个整数")
-        if kind == "drag" and (points[0] == points[1] or (points[0][0] != points[1][0] and points[0][1] != points[1][1])):
-            raise ProtocolError("hint 拖动路径必须是非零直线")
+        if kind == "drag" and (points[0] == points[1] or
+                               (len(points) == 3 and points[0][0] != points[1][0] and points[0][1] != points[1][1])):
+            raise ProtocolError("hint 拖动起终点不能重合；三点提示的拖动路径必须横向或纵向")
         if kind == "line" and points[0] == points[1]:
             raise ProtocolError("hint 直线的起点和终点不能相同")
-        return HintEvent(kind, tuple(tuple(point) for point in points), _required_string(payload, "label"))
+        duration = payload.get('duration', .5)
+        if type(duration) not in (int, float) or not math.isfinite(duration) or not .1 <= duration <= 5:
+            raise ProtocolError('hint 动作时长必须在 0.1 到 5 秒之间')
+        return HintEvent(kind, tuple(tuple(point) for point in points), _required_string(payload, "label"), duration)
     if event_type == "preview":
         _require_exact_fields(
             payload,
@@ -495,6 +510,7 @@ __all__ = (
     "PetReleaseEvent",
     "InputRequestEvent",
     "InputCancelEvent",
+    "InputBlockedEvent",
     "HintEvent",
     "PreviewEvent",
     "ProtocolError",

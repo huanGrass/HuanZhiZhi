@@ -75,26 +75,35 @@ class ApplicationTests(unittest.TestCase):
 
     def test_runtime_transparency_preference_survives_application_restart(self):
         self.start_fixture()
-        self.assertTrue(self.presentation._strip.transparency.isChecked())
-        self.presentation._strip.transparency.setChecked(False)
+        self.assertEqual(self.presentation._strip.transparency.value(), 40)
+        self.presentation._strip.transparency.setValue(73)
         self.host._close_components()
         self.host = HuanZhiZhiApplication(self.app, project_root=self.root,
                                         settings_path=self.root/'settings.ini')
         self.tasks = self.host.tasks
         self.presentation = self.tasks.presentation
-        self.assertFalse(self.presentation._strip.transparency.isChecked())
+        self.assertEqual(self.presentation._strip.transparency.value(), 73)
         with patch.object(self.host.pet, 'set_runtime_transparency') as apply:
             self.tasks.start_task('fixture')
             self.wait_for(lambda: self.presentation.status[0] == '等待你操作')
-            apply.assert_called_with(True, False)
-            self.presentation._strip.transparency.setChecked(True)
-            apply.assert_called_with(True, True)
+            apply.assert_called_with(True, 73)
+            self.presentation._strip.transparency.setValue(28)
+            apply.assert_called_with(True, 28)
             from huanzhizhi.settings import SettingsComponent
             saved = SettingsComponent(self.root/'settings.ini')
             try:
-                self.assertTrue(saved.get_runtime_transparent())
+                self.assertEqual(saved.get_runtime_transparency(), 28)
             finally:
                 saved.close()
+
+    def test_broom_theme_survives_application_restart(self):
+        self.host.pet.set_theme('broom')
+        self.host._close_components()
+        self.host = HuanZhiZhiApplication(self.app, project_root=self.root,
+                                        settings_path=self.root/'settings.ini')
+        self.assertEqual(self.host.settings.get_pet_theme(), 'broom')
+        self.assertEqual(self.host.pet.theme, 'broom')
+        self.assertEqual(self.host.pet._animation.theme, 'broom')
 
     def test_newly_saved_skill_enters_test_group(self):
         self.assertEqual(self.tasks.get_task_preferences('fixture')['group'], 'formal')
@@ -316,7 +325,7 @@ class ApplicationTests(unittest.TestCase):
     def test_failure_bubble_repair_sends_context_to_existing_edit_worker(self):
         bubble = self.fail_fixture()
         self.wait_for(lambda: self.tasks.process.state == 'idle')
-        self.assertEqual(bubble.label.text(), '出现未知情况')
+        self.assertEqual(bubble.label.text(), 'RuntimeError: repair test failure')
         self.assertEqual(bubble.repair_button.text(), '让 AI 检查并修复')
         self.assertEqual(bubble.dismiss_button.text(), '暂不处理')
         self.assertFalse(bubble.hide_timer.isActive())
@@ -417,7 +426,7 @@ except Exception as error:
         bubble = self.fail_fixture()
         self.wait_for(lambda: self.tasks.process.state == 'idle')
         self.tasks.error.emit('鼠标监听失败')
-        self.assertEqual(bubble.label.text(), '出现未知情况')
+        self.assertEqual(bubble.label.text(), '鼠标监听失败')
         self.assertFalse(bubble.repair_button.isVisible())
         with patch('huanzhizhi.pet.chat_window.CreationWorker') as worker_type:
             bubble.repair_button.click()
@@ -979,7 +988,7 @@ class SettingsRenameTests(unittest.TestCase):
 
     def test_theme_startup_defaults_and_legacy_migration(self):
         for saved, expected in ((None, 'ufo'), ('original', 'ufo'),
-                                ('ufo', 'ufo'), ('broom', 'broom')):
+                                ('ufo', 'ufo'), ('broom', 'broom'), ('deepseek', 'ufo'), ('dafeiyu', 'ufo')):
             with self.subTest(saved=saved), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 path = root / 'settings.ini'
@@ -995,6 +1004,10 @@ class SettingsRenameTests(unittest.TestCase):
                     if saved is not None:
                         raw.sync()
                         self.assertEqual(raw.value('desktopPetTheme'), expected)
+                    host.pet.set_theme('ufo')
+                    host.pet.set_theme('broom')
+                    raw.sync()
+                    self.assertEqual(raw.value('desktopPetTheme'), 'broom')
                 finally:
                     host._close_components()
                     self.app.processEvents()

@@ -116,6 +116,39 @@ class AnimatedClickTests(unittest.TestCase):
         self.native.post_message.assert_not_called()
         self.assertEqual(self.events.read_bytes(), b'')
 
+    def test_hint_reuses_click_coordinates_without_any_input_in_all_input_modes(self):
+        for mode in ('background', 'background_smooth', 'foreground'):
+            for action in ('click', 'right_click', 'double_click'):
+                with self.subTest(mode=mode, action=action), \
+                        patch.dict(os.environ, HUANZHIZHI_INPUT_MODE=mode), \
+                        patch('huanzhizhi.platform.target_window._request_foreground_input') as request:
+                    self.events.write_bytes(b'')
+                    self.api.post_click(self.window, 30, 40, action, hint=True)
+                    event = json.loads(self.events.read_text(encoding='utf-8'))
+                    self.assertEqual((event['type'], event['kind'], event['points']),
+                                     ('hint', action, [[-170, 140]]))
+                    request.assert_not_called()
+        self.native.post_message.assert_not_called()
+
+    def test_hint_drag_reuses_both_endpoints_and_duration_without_input(self):
+        self.api.post_drag(self.window, 30, 40, 100, 150, duration=.8, hint=True)
+        from huanzhizhi.tasks.protocol import parse_event_line
+        event = parse_event_line(self.events.read_text(encoding='utf-8'))
+        self.assertEqual((event.kind, event.points, event.duration), ('drag', ((-170, 140), (-100, 250)), .8))
+        self.native.post_message.assert_not_called()
+
+    def test_hint_keeps_target_and_coordinate_validation_before_display(self):
+        for action in (lambda: self.api.post_click(self.window, 320, 40, hint=True),
+                       lambda: self.api.post_drag(self.window, 30, 40, 100, 200, hint=True),
+                       lambda: self.api.post_click(self.window, 30, 40, hint='yes')):
+            with self.assertRaises((ValueError, TypeError)):
+                action()
+        self.api._require_unchanged.side_effect = DesktopWindowsError('window moved')
+        with self.assertRaises(DesktopWindowsError):
+            self.api.post_click(self.window, 30, 40, hint=True)
+        self.assertEqual(self.events.read_bytes(), b'')
+        self.native.post_message.assert_not_called()
+
     def test_closed_or_missing_feedback_channel_prevents_silent_click(self):
         self.events.unlink()
         with self.assertRaises(FileNotFoundError):

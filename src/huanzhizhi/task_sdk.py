@@ -26,9 +26,16 @@ _active_session = None
 
 def _input_mode() -> str:
     mode = os.environ.get('HUANZHIZHI_INPUT_MODE', 'background')
-    if mode not in {'background', 'foreground'}:
-        raise ValueError('HUANZHIZHI_INPUT_MODE 必须是 background 或 foreground')
+    if mode not in {'background', 'background_smooth', 'foreground'}:
+        raise ValueError('HUANZHIZHI_INPUT_MODE 必须是 background、background_smooth 或 foreground')
     return mode
+
+
+def _ensure_input_allowed() -> None:
+    if os.environ.get('HUANZHIZHI_INPUT_ALLOWED') == '0':
+        # Report before raising so catching the exception cannot pass the trial.
+        _emit_json(dict(protocol_version=PROTOCOL_VERSION, type='input_blocked'))
+        raise RuntimeError('提示验收期间禁止输入')
 
 
 def _write_event_file(events: str | Path, payload: dict) -> None:
@@ -92,7 +99,9 @@ def _request_foreground_input(window: dict, kind: str, x: int, y: int,
                 raise InterruptedError('输入通道已关闭，已取消等待输入')
             try:
                 response = reply.read_bytes()
-            except FileNotFoundError:
+            except (FileNotFoundError, PermissionError):
+                # A published reply can be briefly locked on Windows. Wait for
+                # this same reply within the deadline; never resend the input.
                 response = None
             if response is not None:
                 try:
@@ -129,6 +138,20 @@ def _emit_click_point(x: int, y: int) -> None:
         _active_session.emit_point(x, y)
     else:
         raise RuntimeError('点击需要连接桌宠：请从任务或技能分析入口运行。')
+
+
+def _emit_action_hint(points: list[tuple[int, int]], kind: str, label: str, *, duration: float = .5) -> None:
+    """Use the existing hint channel for a validated window action, without input."""
+    if _active_session is not None:
+        if _active_session.stop_requested:
+            raise InterruptedError('已停止，未继续提示')
+        _active_session.emit_hint(points, kind, label, duration=duration)
+    elif events := os.environ.get('HUANZHIZHI_CLICK_EVENTS'):
+        _write_event_file(events, dict(protocol_version=PROTOCOL_VERSION, type='hint',
+                                       kind=kind, points=points, label=_required_string(label, 'hint.label'),
+                                       duration=duration))
+    else:
+        raise RuntimeError('提示需要连接桌宠：请从任务或技能分析入口运行。')
 
 if os.name == "nt":
     import ctypes
@@ -548,9 +571,16 @@ class TaskSession:
                 except OSError:
                     pass
 
-    def emit_hint(self, points: list[tuple[int, int]], kind: str, label: str) -> None:
-        """Request a visual-only hint in physical screen coordinates."""
-        expected = {"clear": {0}, "click": {1, 2}, "drag": {3}, "line": {2}}
+    def emit_hint(self, points: list[tuple[int, int]], kind: str, label: str, *, duration: float = .5) -> None:
+        """Low-level visual hints in physical screen coordinates.
+
+        Prefer Win32DesktopApi.post_click/post_drag(hint=True) for window
+        actions: they share target validation and coordinates with real input.
+        Hints expire after 1800 ms; renew only after observing the current state.
+        Line is a 200 ms auxiliary stroke. Clear before the final event.
+        """
+        expected = {"clear": {0}, "click": {1, 2}, "right_click": {1}, "double_click": {1},
+                    "drag": {2, 3}, "line": {2}}
         if kind not in expected or not isinstance(points, list) or len(points) not in expected[kind]:
             _fatal("hint 的类型或坐标数量无效")
         for point in points:
@@ -560,8 +590,11 @@ class TaskSession:
                 _fatal("hint 坐标必须是两个整数")
         if kind == "line" and tuple(points[0]) == tuple(points[1]):
             _fatal("hint 直线的起点和终点不能相同")
+        if type(duration) not in (int, float) or not math.isfinite(duration) or not .1 <= duration <= 5:
+            _fatal('hint 动作时长必须在 0.1 到 5 秒之间')
         self._emit_event("hint", kind=kind, points=[list(point) for point in points],
-                         label=_required_string(label, "hint.label"))
+                         label=_required_string(label, "hint.label"),
+                         **({'duration': duration} if duration != .5 else {}))
 
     def emit_preview(
         self,

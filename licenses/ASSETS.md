@@ -21,7 +21,7 @@
 
 维护者于 2026-10-19 确认，飞碟与扫帚主题图片由其使用 AI 生成，可以公开使用，并允许随项目使用、复制、修改和分发。维护者就其拥有的权利按根目录 [MIT License](../LICENSE) 授权。
 
-授权涵盖以下目录中的 `core.webp`、`actions.webp` 和 `contact-v2.webp`：
+授权涵盖以下目录中的 `atlas.webp`，由原 `core.webp`、`actions.webp` 和 `contact-v2.webp` 中实际使用的帧按显示比例缩放、重排合并，并无损编码：
 
 - `src/huanzhizhi/assets/themes/ufo/`
 - `src/huanzhizhi/assets/themes/broom/`

@@ -165,12 +165,15 @@ class NativeForegroundTests(unittest.TestCase):
         if kind == 'drag' and not cancel:
             self.assertGreater(len([e for e in self.target.events if e['phase'] == 'drag']), 5, record)
         self.assertFalse(self.pet.foreground_active)
-        self.assertEqual(self.pet.window.windowOpacity(), 1.)
-        # Includes the two-second nearby wait before the return flight.
-        deadline = time.monotonic()+4
+        # Input completes on release; normal feedback stays translucent until
+        # the eight-second nearby wait and return flight finish. Cancellation
+        # restores opacity immediately.
+        self.assertAlmostEqual(self.pet.window.windowOpacity(), 1. if cancel else .6, places=2)
+        deadline = time.monotonic()+12
         while actor.visual_active and time.monotonic() < deadline:
             QtTest.QTest.qWait(10)
         self.assertFalse(actor.visual_active)
+        self.assertEqual(self.pet.window.windowOpacity(), 1.)
         self.assertEqual(self.pet.window.pos(), home)
         self.assertTrue(actor.mirrored)
 

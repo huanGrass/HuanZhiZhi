@@ -124,6 +124,7 @@ s.emit_status('接管成功', '测试', 'ready')
 '''+ending, encoding='utf-8')
             write_skill_manifest(task)
             pet = create_test_pet(initial_position=QtCore.QPoint(100, 100))
+            pet.set_theme('broom')
             host = TaskHostComponent(pet, root)
             self.errors = []
             host.error.connect(self.errors.append)

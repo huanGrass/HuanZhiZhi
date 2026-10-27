@@ -6,7 +6,7 @@ import time
 
 from huanzhizhi.python_runtime import _stop_process
 from huanzhizhi.tasks.protocol import (
-    PointEvent, InputRequestEvent, InputCancelEvent, encode_input_result, parse_event_line,
+    PointEvent, HintEvent, InputRequestEvent, InputCancelEvent, encode_input_result, parse_event_line,
 )
 from huanzhizhi.task_sdk import input_result_path
 
@@ -28,11 +28,13 @@ def run_agent(worker, command, turn, *, stdout_name, consume=None, environment=N
     """Run one child, drain its output, and stop the complete process tree."""
     clicks = turn / 'clicks.jsonl'
     clicks.touch()
+    worker.hint_events = turn / 'host_hints.jsonl'
+    worker.hint_events.touch()
     env = os.environ.copy()
     env.update(environment or {})
     env['HUANZHIZHI_CLICK_EVENTS'] = str(clicks.resolve())
     input_mode = getattr(worker, 'input_mode', 'background')
-    if input_mode not in ('background', 'foreground'):
+    if input_mode not in ('background', 'background_smooth', 'foreground'):
         raise ValueError('未知鼠标操作模式')
     env['HUANZHIZHI_INPUT_MODE'] = input_mode
     if not allow_input:
@@ -84,13 +86,16 @@ def run_agent(worker, command, turn, *, stdout_name, consume=None, environment=N
                         pending.add(event.request_id)
                     if final or worker.isInterruptionRequested():
                         reply(event.request_id, '本轮工作已停止')
-                    elif input_mode != 'foreground':
+                    elif input_mode not in ('foreground', 'background_smooth'):
                         reply(event.request_id, '本轮没有启用前台操作')
                     else:
                         worker.input_request.emit(event, lambda error=None, request_id=event.request_id:
                                                   reply(request_id, None if error is None else str(error)))
                 elif isinstance(event, PointEvent) and not worker.isInterruptionRequested():
                     worker.click_point.emit(event.x, event.y)
+                elif isinstance(event, HintEvent):
+                    if not worker.isInterruptionRequested() and (not final or event.kind == 'clear'):
+                        worker.hint.emit(event)
                 elif not isinstance(event, PointEvent):
                     raise ValueError('点击通道事件类型无效')
 

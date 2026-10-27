@@ -53,6 +53,15 @@ class ForegroundApplicationTests(unittest.TestCase):
         self.reply.assert_called_once_with(None)
         self.host.chat._stop_exploration.assert_not_called()
 
+    def test_smooth_background_uses_background_backend_and_waits_for_completion(self):
+        self.host.settings.get_input_mode.return_value = 'background_smooth'
+        self.start()
+        animate = self.host.pet.start_foreground_input
+        self.assertEqual(animate.call_args.kwargs, {'background': True})
+        self.reply.assert_not_called()
+        animate.call_args.args[1](None)
+        self.reply.assert_called_once_with(None)
+
     def test_interrupted_input_replies_then_stops_the_same_worker(self):
         order = []
         self.reply.side_effect = lambda error: order.append(("reply", error))

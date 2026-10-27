@@ -337,6 +337,15 @@ class CreationTests(unittest.TestCase):
             resumed.run()
         model.assert_not_called()
 
+    def test_chess_uses_the_same_creation_and_publication_path(self):
+        self.worker.target = WindowInfo(123, '象棋单机游戏', 0, 0, 800, 600)
+        self.worker.goal = '识别当前棋局并提示或自动走棋'
+        with patch('huanzhizhi.skill_creation.develop', side_effect=self.prepare_task) as develop:
+            self.worker.run()
+        develop.assert_called_once_with(self.worker)
+        self.assertEqual(self.errors, [], self.logs)
+        self.assertEqual(len(self.saved), 1)
+
     def test_new_skill_does_not_publish_draft_runtime(self):
         def prepare(worker):
             result = self.prepare_task(worker)

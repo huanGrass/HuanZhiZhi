@@ -94,13 +94,15 @@ class TaskProcessManager(QtCore.QObject):
         return bytes(self._stderr_buffer).decode("utf-8", errors="replace")
 
     def start(self, task_id: str, script_path: Path, options: dict | None = None,
-              *, input_mode: str = 'background') -> None:
+              *, input_mode: str = 'background', allow_input: bool = True) -> None:
         if self._state != "idle" or self._process is not None:
             raise RuntimeError("已有任务正在运行")
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id 必须是非空字符串")
-        if not isinstance(input_mode, str) or input_mode not in {'background', 'foreground'}:
-            raise ValueError('input_mode 必须是 background 或 foreground')
+        if not isinstance(input_mode, str) or input_mode not in {'background', 'background_smooth', 'foreground'}:
+            raise ValueError('input_mode 必须是 background、background_smooth 或 foreground')
+        if type(allow_input) is not bool:
+            raise TypeError('allow_input 必须是布尔值')
         path = Path(script_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"任务脚本不存在：{path}")
@@ -119,6 +121,7 @@ class TaskProcessManager(QtCore.QObject):
         environment.insert("PYTHONUNBUFFERED", "1")
         environment.insert("PYTHONIOENCODING", "utf-8")
         environment.insert('HUANZHIZHI_INPUT_MODE', input_mode)
+        environment.insert('HUANZHIZHI_INPUT_ALLOWED', '1' if allow_input else '0')
         process.setProcessEnvironment(environment)
         process.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.SeparateChannels)
         process.started.connect(self._handle_started)
